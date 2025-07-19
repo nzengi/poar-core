@@ -482,7 +482,7 @@ impl CacheOptimizer {
     /// Compress cache data
     async fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         // Use fast compression for cache data
-        let compressed = lz4::block::compress(data, None, false)?;
+        let compressed = lz4_flex::compress(data);
         Ok(compressed)
     }
 

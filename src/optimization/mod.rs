@@ -194,7 +194,7 @@ impl PerformanceOptimizer {
         }
         
         if self.config.enable_gpu_optimization {
-            if let Some(ref mut gpu_optimizer) = self.gpu_optimizer {
+            if let Some(ref gpu_optimizer) = self.gpu_optimizer {
                 gpu_optimizer.initialize().await?;
             }
         }
@@ -284,6 +284,26 @@ impl PerformanceOptimizer {
         Ok(())
     }
 
+    /// Update optimization configuration
+    pub async fn update_config(&mut self, new_config: OptimizationConfig) {
+        self.config = new_config;
+        log::info!("Optimization configuration updated");
+    }
+
+    /// Generate optimization report
+    pub async fn generate_report(&self) -> OptimizationReport {
+        let current_metrics = self.get_current_metrics().await;
+        let history = self.get_metrics_history().await;
+        
+        OptimizationReport {
+            current_metrics,
+            average_metrics: self.calculate_average_metrics(&history),
+            improvements: self.calculate_improvements(&history),
+            recommendations: self.generate_recommendations(&current_metrics),
+            timestamp: Instant::now(),
+        }
+    }
+
     /// Start background monitoring loop
     async fn start_monitoring_loop(&self) {
         let metrics_history = Arc::clone(&self.metrics_history);
@@ -307,6 +327,87 @@ impl PerformanceOptimizer {
                 }
             }
         });
+    }
+
+    /// Calculate average metrics over time
+    fn calculate_average_metrics(&self, history: &[PerformanceMetrics]) -> PerformanceMetrics {
+        if history.is_empty() {
+            return PerformanceMetrics::default();
+        }
+
+        let count = history.len() as f64;
+        let sum = history.iter().fold(PerformanceMetrics::default(), |mut acc, m| {
+            acc.throughput_tps += m.throughput_tps;
+            acc.latency_ms += m.latency_ms;
+            acc.memory_usage_mb += m.memory_usage_mb;
+            acc.cpu_usage_percent += m.cpu_usage_percent;
+            acc.network_bandwidth_mbps += m.network_bandwidth_mbps;
+            acc.proof_generation_ms += m.proof_generation_ms;
+            acc.proof_verification_ms += m.proof_verification_ms;
+            acc.cache_hit_ratio += m.cache_hit_ratio;
+            acc.compression_ratio += m.compression_ratio;
+            acc
+        });
+
+        PerformanceMetrics {
+            throughput_tps: sum.throughput_tps / count,
+            latency_ms: sum.latency_ms / count,
+            memory_usage_mb: sum.memory_usage_mb / count,
+            cpu_usage_percent: sum.cpu_usage_percent / count,
+            network_bandwidth_mbps: sum.network_bandwidth_mbps / count,
+            proof_generation_ms: sum.proof_generation_ms / count,
+            proof_verification_ms: sum.proof_verification_ms / count,
+            cache_hit_ratio: sum.cache_hit_ratio / count,
+            compression_ratio: sum.compression_ratio / count,
+            timestamp: Instant::now(),
+        }
+    }
+
+    /// Calculate performance improvements
+    fn calculate_improvements(&self, history: &[PerformanceMetrics]) -> HashMap<String, f64> {
+        let mut improvements = HashMap::new();
+        
+        if history.len() < 2 {
+            return improvements;
+        }
+
+        let first = &history[0];
+        let last = &history[history.len() - 1];
+
+        improvements.insert("throughput_improvement".to_string(), 
+            ((last.throughput_tps - first.throughput_tps) / first.throughput_tps) * 100.0);
+        improvements.insert("latency_improvement".to_string(),
+            ((first.latency_ms - last.latency_ms) / first.latency_ms) * 100.0);
+        improvements.insert("memory_improvement".to_string(),
+            ((first.memory_usage_mb - last.memory_usage_mb) / first.memory_usage_mb) * 100.0);
+
+        improvements
+    }
+
+    /// Generate optimization recommendations
+    fn generate_recommendations(&self, metrics: &PerformanceMetrics) -> Vec<String> {
+        let mut recommendations = Vec::new();
+
+        if metrics.throughput_tps < self.config.target_tps * 0.8 {
+            recommendations.push("Consider enabling GPU acceleration for higher throughput".to_string());
+            recommendations.push("Optimize critical path algorithms with SIMD instructions".to_string());
+        }
+
+        if metrics.latency_ms > self.config.target_latency_ms * 1.2 {
+            recommendations.push("Enable async optimization for better latency".to_string());
+            recommendations.push("Increase cache sizes to reduce I/O latency".to_string());
+        }
+
+        if metrics.memory_usage_mb > self.config.memory_limit_mb * 0.9 {
+            recommendations.push("Enable memory optimization and compression".to_string());
+            recommendations.push("Consider implementing memory pooling".to_string());
+        }
+
+        if metrics.cache_hit_ratio < 0.8 {
+            recommendations.push("Tune cache algorithms and increase cache sizes".to_string());
+        }
+
+        recommendations
     }
 }
 

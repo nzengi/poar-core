@@ -3,6 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use crossbeam::channel::{Receiver, Sender, unbounded};
+use cpu_time::ProcessTime;
 
 use super::{PerformanceMetrics, OptimizationConfig};
 
@@ -143,6 +144,18 @@ impl CpuOptimizer {
         Ok(())
     }
 
+    /// Execute CPU-intensive task with optimization
+    pub async fn execute_optimized<F, R>(&self, workload_type: WorkloadType, task: F) -> Result<R, Box<dyn std::error::Error>>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let scheduler = self.workload_schedulers.get(&workload_type)
+            .ok_or("Workload scheduler not found")?;
+
+        scheduler.schedule_task(task).await
+    }
+
     /// Execute parallel CPU task with rayon
     pub async fn execute_parallel<F, R>(&self, data: Vec<R>, operation: F) -> Vec<R>
     where
@@ -209,7 +222,12 @@ impl CpuOptimizer {
     async fn get_cpu_usage() -> f64 {
         // Simplified CPU usage calculation
         // In production, this would use platform-specific APIs
-        65.0 // Simulated value
+        let start = ProcessTime::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let cpu_time = start.elapsed();
+        
+        // Convert to percentage (simplified)
+        (cpu_time.as_secs_f64() / 0.1) * 100.0
     }
 
     /// Get system load average
@@ -290,6 +308,27 @@ impl WorkloadScheduler {
             task_queue,
             priority: Arc::new(std::sync::RwLock::new(priority)),
         }
+    }
+
+    pub async fn schedule_task<F, R>(&self, task: F) -> Result<R, Box<dyn std::error::Error>>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        
+        let wrapped_task = Box::new(move || {
+            let result = task();
+            let _ = result_sender.send(result);
+        });
+
+        self.task_queue.0.send(wrapped_task)?;
+        
+        // Simulate task execution
+        tokio::task::yield_now().await;
+        
+        // In a real implementation, this would wait for the actual task result
+        Ok(result_receiver.recv()?)
     }
 
     pub async fn adjust_priority(&self) -> Result<(), Box<dyn std::error::Error>> {

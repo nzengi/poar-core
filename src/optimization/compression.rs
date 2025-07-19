@@ -337,7 +337,7 @@ impl AdaptiveCompressionEngine {
     async fn compress_with_algorithm(&self, data: &[u8], algorithm: &CompressionAlgorithm) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         match algorithm {
             CompressionAlgorithm::LZ4 => {
-                let compressed = lz4::block::compress(data, None, false)?;
+                let compressed = lz4_flex::compress(data);
                 Ok(compressed)
             }
             CompressionAlgorithm::ZSTD => {
@@ -364,7 +364,7 @@ impl AdaptiveCompressionEngine {
             }
             _ => {
                 // Fallback to LZ4
-                let compressed = lz4::block::compress(data, None, false)?;
+                let compressed = lz4_flex::compress(data);
                 Ok(compressed)
             }
         }
@@ -373,7 +373,7 @@ impl AdaptiveCompressionEngine {
     async fn decompress_with_algorithm(&self, compressed_data: &[u8], algorithm: &CompressionAlgorithm) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         match algorithm {
             CompressionAlgorithm::LZ4 => {
-                let decompressed = lz4::block::decompress(compressed_data, None)?;
+                let decompressed = lz4_flex::decompress_size_prepended(compressed_data)?;
                 Ok(decompressed)
             }
             CompressionAlgorithm::ZSTD => {
