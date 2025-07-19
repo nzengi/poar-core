@@ -1,6 +1,6 @@
 [package]
 name = "poar-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["POAR Team <team@poar.network>"]
 description = "POAR ZK-PoV Consensus Blockchain Core - Revolutionary Zero-Knowledge Proof of Validity"
