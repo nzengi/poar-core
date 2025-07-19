@@ -171,6 +171,7 @@ testcontainers = "0.15"           # Integration testing with Docker
 fake = "2.9"                      # Fake data generation
 
 # Code coverage and analysis
+tarpaulin = { version = "0.27", optional = true }
 
 # Performance testing and monitoring
 psutil = "3.2"                    # Process and system monitoring
@@ -214,16 +215,3 @@ panic = "abort"
 opt-level = 0
 debug = true
 overflow-checks = true
-
-# Additional dependencies
-env_logger = "0.10"             # Logging
-log = "0.4"                     # Logging macros
-
-# Performance optimization dependencies
-futures-util = "0.3"            # Future utilities
-async-trait = "0.1"             # Async traits
-lru = "0.12"                    # LRU cache
-wide = "0.7"                    # SIMD operations
-flamegraph = "0.6"              # Performance profiling
-lz4 = "1.24"                    # Ultra-fast compression
-flate2 = "1.0"                  # GZIP compression

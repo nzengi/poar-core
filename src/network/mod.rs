@@ -2,10 +2,20 @@
 // P2P networking layer for blockchain communication
 
 pub mod p2p;
-pub mod protocol;
 pub mod discovery;
+pub mod protocol;
 
-// Re-export network types
-pub use p2p::*;
-pub use protocol::*;
-pub use discovery::*; 
+pub use p2p::{
+    P2PNetworkManager, NetworkConfig, NetworkEvent, MessageType, NetworkError,
+    PeerInfo, PeerStatus, NetworkStats, GossipsubConfig, KademliaConfig
+};
+
+pub use discovery::{
+    PeerDiscoveryManager, DiscoveryConfig, PeerRecord, ReputationSystem, 
+    ReputationScore, TrustLevel, BanReason, DiscoveryStats
+};
+
+pub use protocol::{
+    MessagePropagationManager, ProtocolHandler, ProtocolMessage, PropagationConfig,
+    MessagePriority, PropagationStrategy, ProtocolResponse, PropagationStats
+}; 
