@@ -63,6 +63,19 @@ impl Hash {
     pub fn is_zero(&self) -> bool {
         self.0 == [0u8; 32]
     }
+    
+    /// Create hash from field element (for Poseidon integration)
+    pub fn from_field_element(field_element: ark_bls12_381::Fr) -> Self {
+        let bytes = field_element.into_bigint().to_bytes_le();
+        let mut hash_bytes = [0u8; 32];
+        
+        // Copy bytes, pad with zeros if needed
+        for (i, &byte) in bytes.iter().take(32).enumerate() {
+            hash_bytes[i] = byte;
+        }
+        
+        Hash(hash_bytes)
+    }
 }
 
 impl fmt::Display for Hash {

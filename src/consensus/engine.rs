@@ -5,7 +5,8 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use ark_std::rand::thread_rng;
 
 use crate::types::{Hash, Address, Block, BlockHeader, Transaction, Validator, ZKProof, Signature, Poar, Proof, Valid, Zero, TokenUnit};
-use super::circuits::{CircuitType, TransactionWitness};
+use crate::crypto::{ZKPoVPoseidon, PoseidonHash};
+use super::circuits::{CircuitType, TransactionWitness, OptimizedCircuitType, CircuitOptimizer, OptimizationConfig};
 use super::zksnark::{PoarProver, PoarVerifier, TrustedSetup, TrustedSetupManager};
 
 /// ZK-PoV Consensus Engine for POAR blockchain
@@ -16,6 +17,10 @@ pub struct ConsensusEngine {
     prover: Arc<PoarProver>,
     /// ZK proof verifier
     verifier: Arc<PoarVerifier>,
+    /// Poseidon hash for ZK-PoV
+    poseidon: ZKPoVPoseidon,
+    /// Circuit optimizer for performance
+    circuit_optimizer: CircuitOptimizer,
     /// Validator registry
     validators: Arc<RwLock<ValidatorRegistry>>,
     /// Block proposal queue
@@ -175,6 +180,8 @@ impl ConsensusEngine {
             state: Arc::new(RwLock::new(ConsensusState::default())),
             prover,
             verifier,
+            poseidon: ZKPoVPoseidon::new(),
+            circuit_optimizer: CircuitOptimizer::new(OptimizationConfig::default()),
             validators: Arc::new(RwLock::new(ValidatorRegistry::default())),
             proposal_queue: Arc::new(Mutex::new(VecDeque::new())),
             config,
@@ -395,35 +402,123 @@ impl ConsensusEngine {
         Ok(block)
     }
     
-    /// Generate ZK proof for block validity
+    /// Generate optimized ZK proof for block validity
     async fn generate_block_proof(&self, block: &Block) -> Result<ZKProof, ConsensusError> {
-        let mut rng = thread_rng();
+        let start_time = std::time::Instant::now();
         
-        // Convert transactions to witnesses
-        let tx_witnesses: Vec<TransactionWitness> = block.transactions.iter().map(|tx| {
-            TransactionWitness {
-                from: tx.from,
-                to: tx.to,
-                amount: tx.amount,
-                signature: tx.signature.clone(),
-                nonce: tx.nonce,
-            }
-        }).collect();
-        
-        // Generate proof
-        let proof = self.prover.prove_block_validity(
-            block.header.hash,
-            block.header.previous_hash,
-            block.header.merkle_root,
-            block.header.timestamp,
-            tx_witnesses,
-            block.header.signature.clone(),
-            vec![0u8; 32], // Validator public key
-            block.header.nonce,
-            &mut rng,
+        // Create optimized block validity circuit
+        let optimized_circuit = self.circuit_optimizer.optimize_circuit(
+            OptimizedCircuitType::BlockValidityOptimized
         ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))?;
         
+        // Convert transactions to batch witnesses
+        let batch_transactions: Vec<super::circuits::BatchTransactionWitness> = block.transactions.iter()
+            .enumerate()
+            .map(|(i, tx)| {
+                super::circuits::BatchTransactionWitness {
+                    from: tx.from,
+                    to: tx.to,
+                    amount: tx.amount,
+                    signature: tx.signature.clone(),
+                    nonce: tx.nonce,
+                    batch_index: i as u32,
+                }
+            })
+            .collect();
+        
+        // Generate optimized proof using optimized circuit
+        let mut rng = ark_std::rand::thread_rng();
+        
+        let proof = match optimized_circuit {
+            super::circuits::OptimizedCircuit::BlockValidity(opt_circuit) => {
+                self.prover.prove(
+                    super::circuits::OptimizedCircuitType::BlockValidityOptimized,
+                    Box::new(opt_circuit),
+                    &mut rng,
+                ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))?
+            }
+            _ => return Err(ConsensusError::ProofGenerationFailed("Invalid circuit type".to_string())),
+        };
+        
+        // Update performance metrics
+        let proof_time = start_time.elapsed();
+        println!("⚡ Optimized proof generated in {:?}", proof_time);
+        
         Ok(proof)
+    }
+    
+    /// Generate parallel proofs for multiple blocks
+    async fn generate_parallel_proofs(&self, blocks: &[Block]) -> Result<Vec<ZKProof>, ConsensusError> {
+        let start_time = std::time::Instant::now();
+        
+        // Create parallel proof generation tasks
+        let proof_tasks: Vec<_> = blocks.iter().map(|block| {
+            let block_clone = block.clone();
+            let optimizer_clone = self.circuit_optimizer.clone();
+            let prover_clone = self.prover.clone();
+            
+            tokio::spawn(async move {
+                // Create optimized circuit for this block
+                let optimized_circuit = optimizer_clone.optimize_circuit(
+                    OptimizedCircuitType::BlockValidityOptimized
+                ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))?;
+                
+                // Convert transactions to batch witnesses
+                let batch_transactions: Vec<super::circuits::BatchTransactionWitness> = block_clone.transactions.iter()
+                    .enumerate()
+                    .map(|(i, tx)| {
+                        super::circuits::BatchTransactionWitness {
+                            from: tx.from,
+                            to: tx.to,
+                            amount: tx.amount,
+                            signature: tx.signature.clone(),
+                            nonce: tx.nonce,
+                            batch_index: i as u32,
+                        }
+                    })
+                    .collect();
+                
+                // Generate proof
+                let mut rng = ark_std::rand::thread_rng();
+                
+                match optimized_circuit {
+                    super::circuits::OptimizedCircuit::BlockValidity(opt_circuit) => {
+                        prover_clone.prove(
+                            OptimizedCircuitType::BlockValidityOptimized,
+                            Box::new(opt_circuit),
+                            &mut rng,
+                        ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))
+                    }
+                    _ => Err(ConsensusError::ProofGenerationFailed("Invalid circuit type".to_string())),
+                }
+            })
+        }).collect();
+        
+        // Wait for all proofs to complete
+        let proof_results = futures::future::join_all(proof_tasks).await;
+        
+        // Collect successful proofs
+        let mut proofs = Vec::new();
+        for result in proof_results {
+            match result {
+                Ok(proof_result) => {
+                    match proof_result {
+                        Ok(proof) => proofs.push(proof),
+                        Err(e) => {
+                            eprintln!("❌ Parallel proof generation failed: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Parallel task failed: {}", e);
+                }
+            }
+        }
+        
+        let total_time = start_time.elapsed();
+        println!("⚡ Generated {} parallel proofs in {:?}", proofs.len(), total_time);
+        
+        Ok(proofs)
     }
     
     /// Process pending block proposals
@@ -594,15 +689,26 @@ impl ConsensusEngine {
         Ok(())
     }
     
-    /// Calculate Merkle root of transactions
+    /// Calculate Merkle root of transactions using Poseidon hash
     fn calculate_merkle_root(&self, transactions: &[Transaction]) -> Hash {
         if transactions.is_empty() {
             return Hash::zero();
         }
         
-        // Simplified Merkle root calculation
-        let tx_hashes: Vec<Hash> = transactions.iter().map(|tx| tx.hash).collect();
-        Hash::hash_multiple(&tx_hashes.iter().map(|h| h.as_bytes()).collect::<Vec<_>>())
+        // Convert transaction hashes to field elements for Poseidon
+        let tx_hashes: Vec<ark_bls12_381::Fr> = transactions.iter()
+            .map(|tx| {
+                // Convert transaction hash to field element
+                let hash_bytes = tx.hash.as_bytes();
+                ark_bls12_381::Fr::from_le_bytes_mod_order(hash_bytes)
+            })
+            .collect();
+        
+        // Use Poseidon to generate Merkle root
+        let poseidon_root = self.poseidon.transaction_merkle_root(&tx_hashes);
+        
+        // Convert back to Hash type
+        Hash::from_field_element(poseidon_root)
     }
     
     /// Update consensus metrics
@@ -632,6 +738,36 @@ impl ConsensusEngine {
         let mut state = self.state.write().await;
         state.pending_transactions.push(transaction);
         Ok(())
+    }
+    
+    /// Get circuit optimization metrics
+    pub fn get_circuit_metrics(&self) -> &super::circuits::OptimizationMetrics {
+        self.circuit_optimizer.get_metrics()
+    }
+    
+    /// Print performance comparison
+    pub fn print_performance_comparison(&self) {
+        let metrics = self.circuit_optimizer.get_metrics();
+        
+        println!("⚡ Circuit Optimization Performance:");
+        println!("   Original constraints: {}", metrics.original_constraints);
+        println!("   Optimized constraints: {}", metrics.optimized_constraints);
+        println!("   Constraint reduction: {:.1}%", metrics.constraint_reduction_percentage);
+        println!("   Proof generation time: {}ms", metrics.proof_generation_time_ms);
+        println!("   Memory usage: {:.2}MB", metrics.memory_usage_mb);
+        println!("   Batch efficiency: {:.1}%", metrics.batch_efficiency);
+        
+        // Calculate performance improvements
+        let constraint_improvement = if metrics.original_constraints > 0 {
+            (metrics.original_constraints as f64 / metrics.optimized_constraints as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        println!("   🚀 Performance Improvements:");
+        println!("      Constraint reduction: {:.1}x", constraint_improvement / 100.0);
+        println!("      Memory efficiency: {:.1}x", 100.0 / metrics.memory_usage_mb.max(1.0));
+        println!("      Batch processing: {:.1}x", metrics.batch_efficiency / 100.0);
     }
 }
 

@@ -4,8 +4,11 @@
 pub mod hash;
 pub mod signature;
 pub mod zk_proof;
+pub mod poseidon;
+pub mod falcon;
 
-// Re-export commonly used types
 pub use hash::*;
 pub use signature::*;
-pub use zk_proof::*; 
+pub use zk_proof::*;
+pub use poseidon::*;
+pub use falcon::*; 
