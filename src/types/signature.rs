@@ -5,6 +5,7 @@ use crate::types::{Hash, POARError, POARResult};
 use crate::crypto::falcon::{FalconSignature, FalconSignatureManager, FalconConfig};
 use crate::crypto::xmss::{XMSSSignature};
 use crate::crypto::hash_based_multi_sig::AggregatedSignature;
+use crate::crypto::signature::Ed25519SignatureBytes;
 use ed25519_dalek::{Signature as Ed25519Signature, SigningKey, VerifyingKey, Signer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -24,7 +25,7 @@ pub enum SignatureKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signature {
-    Ed25519([u8; ED25519_SIGNATURE_SIZE]),
+    Ed25519(Ed25519SignatureBytes),
     Falcon(FalconSignature),
     XMSS(XMSSSignature),
     AggregatedHashBasedMultiSig(AggregatedSignature),
@@ -67,14 +68,14 @@ impl Signature {
         match kind {
             SignatureKind::Ed25519 => {
                 if bytes.len() != ED25519_SIGNATURE_SIZE {
-            return Err(POARError::CryptographicError(
+                    return Err(POARError::CryptographicError(
                         format!("Invalid Ed25519 signature length: expected {}, got {}", ED25519_SIGNATURE_SIZE, bytes.len())
-            ));
-        }
-                let mut arr = [0u8; ED25519_SIGNATURE_SIZE];
+                    ));
+                }
+                let mut arr = [0u8; 64];
                 arr.copy_from_slice(bytes);
-                Ok(Signature::Ed25519(arr))
-    }
+                Ok(Signature::Ed25519(Ed25519SignatureBytes(arr)))
+            }
             SignatureKind::Falcon => {
                 let sig: FalconSignature = bincode::deserialize(bytes)
                     .map_err(|_| POARError::CryptographicError("Invalid Falcon signature bytes".to_string()))?;
@@ -95,26 +96,48 @@ impl Signature {
     pub fn verify(&self, message: &[u8], public_key: &PublicKey) -> POARResult<bool> {
         match (self, public_key) {
             (Signature::Ed25519(bytes), PublicKey::Ed25519(pk_bytes)) => {
-                let ed25519_sig = Ed25519Signature::from_bytes(bytes);
+                let ed25519_sig = Ed25519Signature::from_bytes(&bytes.0);
                 let ed25519_pk = VerifyingKey::from_bytes(pk_bytes)
-            .map_err(|e| POARError::CryptographicError(format!("Invalid public key: {}", e)))?;
-        match ed25519_pk.verify_strict(message, &ed25519_sig) {
-            Ok(()) => Ok(true),
-            Err(_) => Ok(false),
-        }
-    }
+                    .map_err(|e| POARError::CryptographicError(format!("Invalid public key: {}", e)))?;
+                match ed25519_pk.verify_strict(message, &ed25519_sig) {
+                    Ok(()) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
             (Signature::Falcon(sig), PublicKey::Falcon(_pk_bytes)) => {
                 let manager = FalconSignatureManager::new(FalconConfig::default());
-                manager.verify(sig, message)
+                manager.verify(sig, message).map_err(|e| POARError::CryptographicError(e.to_string()))
             }
             (Signature::XMSS(sig), PublicKey::XMSS(_pk_bytes)) => {
-                Ok(crate::crypto::xmss::XMSS::verify(message, sig))
+                // TODO: Pass correct root and ots_public_keys here
+                // Ok(sig.verify(message, root, ots_public_keys))
+                unimplemented!("XMSS signature verification requires root and ots_public_keys")
             }
             (Signature::AggregatedHashBasedMultiSig(agg_sig), PublicKey::AggregatedHashBasedMultiSig(pk_list)) => {
-                Ok(crate::crypto::hash_based_multi_sig::verify_aggregated_signature(message, agg_sig, pk_list))
+                // TODO: Pass correct root and ots_public_keys here
+                // Ok(crate::crypto::hash_based_multi_sig::verify_aggregated_signature(message, agg_sig, root, ots_public_keys, pk_list))
+                unimplemented!("Aggregated signature verification requires root and ots_public_keys")
             }
             _ => Err(POARError::CryptographicError("Signature/PublicKey type mismatch".to_string())),
         }
+    }
+}
+
+impl Default for Signature {
+    fn default() -> Self {
+        Signature::Ed25519(crate::crypto::signature::Ed25519SignatureBytes([0u8; 64]))
+    }
+}
+
+impl AsRef<[u8]> for crate::crypto::signature::Ed25519SignatureBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl crate::crypto::signature::Ed25519SignatureBytes {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
     }
 }
 
@@ -133,7 +156,7 @@ impl PublicKey {
             }
             SignatureKind::Falcon => Ok(PublicKey::Falcon(bytes.to_vec())),
             SignatureKind::XMSS => Ok(PublicKey::XMSS(bytes.to_vec())),
-            SignatureKind::AggregatedHashBasedMultiSig(_) => {
+            SignatureKind::AggregatedHashBasedMultiSig => {
                 // This case is not directly handled here, as AggregatedHashBasedMultiSig is a Vec<Vec<u8>>
                 // and we need to deserialize the list of public keys.
                 // This requires a more complex deserialization logic.
@@ -173,7 +196,7 @@ impl PrivateKey {
     }
             SignatureKind::Falcon => Ok(PrivateKey::Falcon(bytes.to_vec())),
             SignatureKind::XMSS => Ok(PrivateKey::XMSS(bytes.to_vec())),
-            SignatureKind::AggregatedHashBasedMultiSig(_) => {
+            SignatureKind::AggregatedHashBasedMultiSig => {
                 // This case is not directly handled here, as AggregatedHashBasedMultiSig is a Vec<Vec<u8>>
                 // and we need to deserialize the list of private keys.
                 // This requires a more complex deserialization logic.

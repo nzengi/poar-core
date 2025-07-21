@@ -1,5 +1,6 @@
 use blake3;
 use serde::{Deserialize, Serialize};
+use ark_ff::PrimeField;
 use std::fmt;
 
 /// BLAKE3 256-bit hash type for POAR blockchain
@@ -66,15 +67,26 @@ impl Hash {
     
     /// Create hash from field element (for Poseidon integration)
     pub fn from_field_element(field_element: ark_bls12_381::Fr) -> Self {
-        let bytes = field_element.into_bigint().to_bytes_le();
+        let bigint = field_element.into_bigint();
         let mut hash_bytes = [0u8; 32];
-        
-        // Copy bytes, pad with zeros if needed
-        for (i, &byte) in bytes.iter().take(32).enumerate() {
-            hash_bytes[i] = byte;
+        // Copy the limbs (u64s) as bytes in little-endian order
+        for (i, limb) in bigint.0.iter().enumerate() {
+            let limb_bytes = limb.to_le_bytes();
+            let start = i * 8;
+            if start < 32 {
+                let end = usize::min(start + 8, 32);
+                hash_bytes[start..end].copy_from_slice(&limb_bytes[..(end - start)]);
+            }
         }
-        
         Hash(hash_bytes)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> [u8; 32] {
+        self.0
     }
 }
 

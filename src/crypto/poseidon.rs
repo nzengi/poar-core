@@ -1,4 +1,4 @@
-use ark_ff::{BigInteger256, Field, PrimeField};
+use ark_ff::{BigInteger, BigInteger256, Field, PrimeField, Zero};
 use ark_bls12_381::Fr;
 use ark_std::{vec::Vec, UniformRand};
 use ark_std::rand::Rng;
@@ -248,6 +248,16 @@ impl ZKPoVPoseidon {
     /// Hash state root
     pub fn hash_state_root(&self, state_data: &[u8]) -> Fr {
         self.hash.hash_bytes(state_data)
+    }
+
+    pub fn hash_bytes_to_vec(&self, data: &[u8]) -> Vec<u8> {
+        let hash_fr = self.hash.hash_bytes(data);
+        let mut bytes = vec![0u8; 32];
+        let limbs = hash_fr.into_bigint().to_bytes_le();
+        for (i, b) in limbs.iter().enumerate().take(32) {
+            bytes[i] = *b;
+        }
+        bytes
     }
 }
 

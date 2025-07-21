@@ -1,11 +1,13 @@
-use ark_ff::Field;
-use ark_bls12_381::Fr;
 use std::collections::HashMap;
-use pqcrypto_falcon::falcon512;
+use pqcrypto_falcon::falcon512::{self, PublicKey, SecretKey, DetachedSignature};
+use pqcrypto_traits::sign::{SecretKey as _, PublicKey as _, DetachedSignature as _};
+use rand::Rng;
+use serde::{Serialize, Deserialize};
 
 /// Falcon signature for post-quantum security
 /// Based on ETH 3.0 Post-Quantum Signatures initiative
 /// 5x smaller than BLS signatures
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FalconSignature {
     /// Signature components
     pub r: Vec<u8>,
@@ -17,6 +19,7 @@ pub struct FalconSignature {
 }
 
 /// Falcon key pair
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FalconKeyPair {
     /// Private key
     pub private_key: Vec<u8>,
@@ -65,9 +68,7 @@ impl FalconSignatureManager {
     
     /// Generate new key pair
     pub fn generate_key_pair(&mut self) -> FalconKeyPair {
-        // Simplified Falcon key generation
-        // In production, use proper Falcon implementation
-        let mut rng = ark_std::rand::thread_rng();
+        let mut rng = rand::thread_rng();
         
         let private_key: Vec<u8> = (0..32)
             .map(|_| rng.gen())
@@ -88,21 +89,21 @@ impl FalconSignatureManager {
     
     /// Sign message with private key
     pub fn sign(&self, message: &[u8], private_key: &[u8]) -> Result<FalconSignature, FalconError> {
-        let sk = falcon512::SecretKey::from_bytes(private_key).map_err(|_| FalconError::InvalidPrivateKey)?;
-        let sig = falcon512::sign(message, &sk);
+        let sk = SecretKey::from_bytes(private_key).map_err(|_| FalconError::InvalidPrivateKey)?;
+        let sig = falcon512::detached_sign(message, &sk);
         Ok(FalconSignature {
             r: sig.as_bytes().to_vec(),
-            s: vec![], // Falcon'da r/s ayrımı yok, sadece signature var
-            public_key: vec![], // Public key burada kullanılmıyor
-            message_hash: vec![], // Hash'e gerek yok
+            s: vec![],
+            public_key: vec![],
+            message_hash: vec![],
         })
     }
     
     /// Verify signature
     pub fn verify(&self, signature: &FalconSignature, message: &[u8]) -> Result<bool, FalconError> {
-        let pk = falcon512::PublicKey::from_bytes(&signature.public_key).map_err(|_| FalconError::InvalidPublicKey)?;
-        let sig = falcon512::Signature::from_bytes(&signature.r).map_err(|_| FalconError::InvalidSignature)?;
-        Ok(falcon512::verify(message, &sig, &pk).is_ok())
+        let sig = DetachedSignature::from_bytes(&signature.r).map_err(|_| FalconError::InvalidSignature)?;
+        let pk = PublicKey::from_bytes(&signature.public_key).map_err(|_| FalconError::InvalidPublicKey)?;
+        Ok(pqcrypto_falcon::falcon512::verify_detached_signature(&sig, message, &pk).is_ok())
     }
     
     /// Hash message for signing
@@ -152,39 +153,20 @@ pub enum FalconError {
     VerificationFailed,
 }
 
-impl Clone for FalconKeyPair {
-    fn clone(&self) -> Self {
-        Self {
-            private_key: self.private_key.clone(),
-            public_key: self.public_key.clone(),
-        }
-    }
-}
-
-impl Clone for FalconSignature {
-    fn clone(&self) -> Self {
-        Self {
-            r: self.r.clone(),
-            s: self.s.clone(),
-            public_key: self.public_key.clone(),
-            message_hash: self.message_hash.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pqcrypto_falcon::falcon512;
-
+    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     #[test]
     fn test_falcon_sign_and_verify() {
         let (pk, sk) = falcon512::keypair();
         let message = b"Test message for Falcon!";
-        let sig = falcon512::sign(message, &sk);
-        assert!(falcon512::verify(message, &sig, &pk).is_ok());
-        // Negatif test
+        let sig = falcon512::detached_sign(message, &sk);
+        let sig_struct = DetachedSignature::from_bytes(sig.as_bytes()).unwrap();
+        let pk_struct = PublicKey::from_bytes(pk.as_bytes()).unwrap();
+        assert!(pqcrypto_falcon::falcon512::verify_detached_signature(&sig_struct, message, &pk_struct).is_ok());
         let wrong_message = b"Wrong message!";
-        assert!(!falcon512::verify(wrong_message, &sig, &pk).is_ok());
+        assert!(!pqcrypto_falcon::falcon512::verify_detached_signature(&sig_struct, wrong_message, &pk_struct).is_ok());
     }
 } 

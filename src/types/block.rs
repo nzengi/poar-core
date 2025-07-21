@@ -89,8 +89,8 @@ impl Block {
     /// Create genesis block
     pub fn genesis() -> Self {
         let genesis_hash = Hash::hash(b"POAR_GENESIS_2025");
-        let genesis_header = BlockHeader {
-            hash: genesis_hash,
+        let mut genesis_header = BlockHeader {
+            hash: Hash::zero(), // temporary, will be set below
             previous_hash: Hash::zero(),
             merkle_root: Hash::zero(),
             state_root: Hash::zero(),
@@ -105,9 +105,15 @@ impl Block {
             difficulty: 1000,
             extra_data: b"POAR Genesis Block".to_vec(),
         };
-        
-        Self {
+        // Calculate the correct hash
+        let block = Self {
             header: genesis_header,
+            transactions: Vec::new(),
+        };
+        let mut header = block.header.clone();
+        header.hash = block.calculate_hash();
+        Self {
+            header,
             transactions: Vec::new(),
         }
     }
@@ -438,7 +444,7 @@ mod tests {
     #[test]
     fn test_block_builder() {
         let previous_hash = Hash::hash(b"previous_block");
-        let validator = Address::from_bytes([1u8; 20]).unwrap();
+        let validator = Address::from_bytes([1u8; 20]);
         let state_root = Hash::hash(b"state_root");
 
         let block = BlockBuilder::new(previous_hash, 1, validator)

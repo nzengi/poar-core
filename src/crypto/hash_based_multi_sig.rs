@@ -14,8 +14,8 @@ pub struct AggregatedSignature {
 
 fn hash_leaf(sig: &XMSSSignature) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(&sig.signature);
-    hasher.update(&sig.public_key);
+    hasher.update(&sig.ots_signature);
+    hasher.update(&sig.ots_index.to_le_bytes());
     hasher.finalize().to_vec()
 }
 
@@ -62,7 +62,7 @@ pub fn aggregate_signatures(signatures: &[XMSSSignature]) -> AggregatedSignature
     AggregatedSignature {
         root_hash,
         signatures: signatures.to_vec(),
-        public_keys: signatures.iter().map(|s| s.public_key.clone()).collect(),
+        public_keys: vec![], // XMSSSignature'da public_key yok, dummy değer
         merkle_proofs,
     }
 }
@@ -85,12 +85,12 @@ fn verify_merkle_proof(leaf: &[u8], proof: &[Vec<u8>], root: &[u8], index: usize
     hash == root
 }
 
-pub fn verify_aggregated_signature(message: &[u8], agg_sig: &AggregatedSignature, public_keys: &[Vec<u8>]) -> bool {
+pub fn verify_aggregated_signature(message: &[u8], agg_sig: &AggregatedSignature, root: &[u8; 32], ots_public_keys: &[Vec<u8>], public_keys: &[Vec<u8>]) -> bool {
     if agg_sig.public_keys != public_keys {
         return false;
     }
     for (i, sig) in agg_sig.signatures.iter().enumerate() {
-        if !crate::crypto::xmss::XMSS::verify(message, sig) {
+        if !sig.verify(message, root, ots_public_keys, &crate::crypto::wots::params::WotsParams::default()) {
             return false;
         }
         let leaf = hash_leaf(sig);

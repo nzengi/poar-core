@@ -22,6 +22,8 @@ ark-std = "0.5"
 ark-serialize = "0.5"
 ark-ff = "0.5"
 ark-ec = "0.5"
+ark-bls12-381 = "0.5"
+thiserror = "1.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -159,8 +161,8 @@ ethereum-types = "0.14"          # Ethereum-compatible types
 # Secure storage backends
 directories = "5.0"               # Standard directory locations
 
-pqcrypto-falcon = "0.2.10"
-pqcrypto-xmss = "0.2.10"
+pqcrypto-falcon = "0.4.0"
+pqcrypto-traits = "0.3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

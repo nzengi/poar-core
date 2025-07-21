@@ -8,6 +8,7 @@ pub mod poseidon;
 pub mod falcon;
 pub mod xmss;
 pub mod hash_based_multi_sig;
+pub mod wots;
 
 pub use hash::*;
 pub use signature::*;
@@ -16,3 +17,4 @@ pub use poseidon::*;
 pub use falcon::*; 
 pub use xmss::*;
 pub use hash_based_multi_sig::*; 
+pub use wots::*; 

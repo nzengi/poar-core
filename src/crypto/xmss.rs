@@ -1,40 +1,50 @@
 use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
+use crate::crypto::wots::{keygen::generate_keypair, sign::sign_message, params::WotsParams};
 
 const WOTS_LEN: usize = 32; // 256 bit
 const XMSS_TREE_HEIGHT: usize = 8; // 256 OTS anahtar
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XMSSKeyPair {
-    pub ots_private_keys: Vec<[u8; WOTS_LEN]>,
-    pub ots_public_keys: Vec<[u8; WOTS_LEN]>,
+    pub ots_private_keys: Vec<Vec<u8>>, // WOTS+ private keys
+    pub ots_public_keys: Vec<Vec<u8>>,  // WOTS+ public keys
     pub merkle_tree: Vec<Vec<[u8; WOTS_LEN]>>, // Her seviye için hashler
     pub root: [u8; WOTS_LEN],
     pub next_unused: usize, // Sıradaki OTS anahtar
+    pub wots_params: WotsParams,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XMSSSignature {
-    pub ots_signature: [u8; WOTS_LEN],
+    pub ots_signature: Vec<u8>, // WOTS+ signature
+    pub ots_public_key: Vec<u8>, // WOTS+ public key
     pub ots_index: usize,
     pub merkle_path: Vec<[u8; WOTS_LEN]>,
 }
 
 impl XMSSKeyPair {
     pub fn generate() -> Self {
-        use rand::RngCore;
+        let wots_params = WotsParams::default();
         let mut ots_private_keys = Vec::new();
         let mut ots_public_keys = Vec::new();
         for _ in 0..(1 << XMSS_TREE_HEIGHT) {
-            let mut sk = [0u8; WOTS_LEN];
-            rand::thread_rng().fill_bytes(&mut sk);
-            let pk = Sha256::digest(&sk);
-            ots_private_keys.push(sk);
-            ots_public_keys.push(pk.into());
+            let keypair = generate_keypair(&wots_params);
+            ots_private_keys.push(keypair.private_key);
+            ots_public_keys.push(keypair.public_key.clone());
         }
         // Merkle ağacı oluştur
-        let mut tree = vec![ots_public_keys.clone()];
-        let mut current = ots_public_keys.clone();
+        let mut tree = vec![
+            ots_public_keys
+                .iter()
+                .map(|pk| {
+                    let mut arr = [0u8; WOTS_LEN];
+                    arr.copy_from_slice(&pk[..WOTS_LEN]);
+                    arr
+                })
+                .collect::<Vec<_>>()
+        ];
+        let mut current = tree[0].clone();
         while current.len() > 1 {
             let mut next = Vec::new();
             for chunk in current.chunks(2) {
@@ -58,14 +68,16 @@ impl XMSSKeyPair {
             merkle_tree: tree,
             root,
             next_unused: 0,
+            wots_params,
         }
     }
     pub fn sign(&mut self, message: &[u8]) -> Option<XMSSSignature> {
         if self.next_unused >= self.ots_private_keys.len() {
             return None;
         }
-        let sk = self.ots_private_keys[self.next_unused];
-        let ots_signature = Sha256::digest([&sk, message].concat());
+        let sk = &self.ots_private_keys[self.next_unused];
+        let pk = &self.ots_public_keys[self.next_unused];
+        let ots_signature = sign_message(message, sk, &self.wots_params);
         let ots_index = self.next_unused;
         // Merkle path hesapla
         let mut path = Vec::new();
@@ -85,7 +97,8 @@ impl XMSSKeyPair {
         }
         self.next_unused += 1;
         Some(XMSSSignature {
-            ots_signature: ots_signature.into(),
+            ots_signature,
+            ots_public_key: pk.clone(),
             ots_index,
             merkle_path: path,
         })
@@ -95,16 +108,25 @@ impl XMSSKeyPair {
     }
 }
 
+fn verify_wots_signature(message: &[u8], signature: &[u8], public_key: &[u8], params: &WotsParams) -> bool {
+    use crate::crypto::wots::keygen::derive_public_key;
+    // WOTS+ doğrulama: imzadan public key türet ve verilen public key ile karşılaştır
+    let derived_pk = derive_public_key(signature, params);
+    &derived_pk == public_key
+}
+
 impl XMSSSignature {
-    pub fn verify(&self, message: &[u8], root: &[u8; WOTS_LEN], ots_public_keys: &[[u8; WOTS_LEN]]) -> bool {
-        // OTS doğrulama (basit hash)
-        let pk = Sha256::digest(&ots_public_keys[self.ots_index]);
-        let sig = Sha256::digest([&ots_public_keys[self.ots_index], message].concat());
-        if sig[..] != self.ots_signature[..] {
+    pub fn verify(&self, message: &[u8], root: &[u8; WOTS_LEN], ots_public_keys: &[Vec<u8>], params: &WotsParams) -> bool {
+        // WOTS+ doğrulama
+        if !verify_wots_signature(message, &self.ots_signature, &self.ots_public_key, params) {
             return false;
         }
         // Merkle path ile root'a ulaş
-        let mut hash = pk.into();
+        let mut hash = {
+            let mut arr = [0u8; WOTS_LEN];
+            arr.copy_from_slice(&self.ots_public_key[..WOTS_LEN]);
+            arr
+        };
         let mut idx = self.ots_index;
         for (level, sibling_hash) in self.merkle_path.iter().enumerate() {
             let (left, right) = if idx % 2 == 0 {
@@ -130,10 +152,10 @@ mod tests {
         let mut kp = XMSSKeyPair::generate();
         let message = b"hello xmss!";
         let sig = kp.sign(message).unwrap();
-        let valid = sig.verify(message, &kp.root, &kp.ots_public_keys);
+        let valid = sig.verify(message, &kp.root, &kp.ots_public_keys, &kp.wots_params);
         assert!(valid);
         // Yanlış mesaj
-        let invalid = sig.verify(b"wrong", &kp.root, &kp.ots_public_keys);
+        let invalid = sig.verify(b"wrong", &kp.root, &kp.ots_public_keys, &kp.wots_params);
         assert!(!invalid);
     }
 

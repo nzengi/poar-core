@@ -1,7 +1,9 @@
 // POAR ZK-PoV Proof Types
 // Revolutionary Zero-Knowledge Proof of Validity system
 
-use crate::types::{Hash, BlockHash, TransactionHash, POARError, POARResult};
+use crate::types::{Hash, POARError, POARResult};
+pub type BlockHash = Hash;
+pub type TransactionHash = Hash;
 use ark_bls12_381::Bls12_381;
 use ark_groth16::{Proof, VerifyingKey};
 use ark_serialize::{CanonicalDeserialize};
@@ -40,7 +42,7 @@ impl fmt::Display for ProofSystem {
 }
 
 /// ZK Proof data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ZKProof {
     /// The proof system used
     pub system: ProofSystem,
@@ -108,6 +110,18 @@ impl ZKProof {
             ProofSystem::FRI => true,   // Variable size
             ProofSystem::STU => true,   // Variable size
             ProofSystem::WHIR => true,  // Variable size
+        }
+    }
+}
+
+impl Default for ZKProof {
+    fn default() -> Self {
+        ZKProof {
+            system: ProofSystem::Groth16,
+            proof_data: Vec::new(),
+            public_inputs: Vec::new(),
+            circuit_id: CircuitId::BlockValidity,
+            timestamp: 0,
         }
     }
 }
@@ -417,8 +431,8 @@ mod tests {
     
     #[test]
     fn test_merkle_inclusion_proof() {
-        let tx_hash = TransactionHash::new(Hash::hash(b"test_tx"));
-        let block_hash = BlockHash::new(Hash::hash(b"test_block"));
+        let tx_hash = TransactionHash::new(Hash::hash(b"test_tx").into_inner());
+        let block_hash = BlockHash::new(Hash::hash(b"test_block").into_inner());
         let merkle_root = Hash::hash(b"merkle_root");
         
         let proof = ZKProof::new(

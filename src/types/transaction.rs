@@ -564,8 +564,8 @@ mod tests {
 
     #[test]
     fn test_transaction_creation() {
-        let from = Address::from_bytes([1u8; 20]).unwrap();
-        let to = Address::from_bytes([2u8; 20]).unwrap();
+        let from = Address::from_bytes([1u8; 20]);
+        let to = Address::from_bytes([2u8; 20]);
         
         let tx = Transaction::new(
             from,
@@ -589,8 +589,8 @@ mod tests {
     #[test]
     fn test_transaction_pool() {
         let mut pool = TransactionPool::new(PoolConfig::default());
-        let from = Address::from_bytes([1u8; 20]).unwrap();
-        let to = Address::from_bytes([2u8; 20]).unwrap();
+        let from = Address::from_bytes([1u8; 20]);
+        let to = Address::from_bytes([2u8; 20]);
         
         let tx = Transaction::new(
             from,
@@ -619,8 +619,8 @@ mod tests {
     #[test]
     fn test_fee_calculator() {
         let fee_calc = FeeCalculator::new();
-        let from = Address::from_bytes([1u8; 20]).unwrap();
-        let to = Address::from_bytes([2u8; 20]).unwrap();
+        let from = Address::from_bytes([1u8; 20]);
+        let to = Address::from_bytes([2u8; 20]);
         
         let tx = Transaction::new(
             from,
