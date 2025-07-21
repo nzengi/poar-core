@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use crate::storage::Database;
-use crate::types::{Hash, Address, AccountState};
+use crate::types::{Hash, Address, AccountState, Poar, Proof, Valid, Zero, TokenUnit, TokenUtils};
 
 /// Advanced state storage with snapshots and efficient updates
 pub struct StateStorage {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use ark_std::rand::thread_rng;
 
-use crate::types::{Hash, Address, Block, BlockHeader, Transaction, Validator, ZKProof, Signature};
+use crate::types::{Hash, Address, Block, BlockHeader, Transaction, Validator, ZKProof, Signature, Poar, Proof, Valid, Zero, TokenUnit};
 use super::circuits::{CircuitType, TransactionWitness};
 use super::zksnark::{PoarProver, PoarVerifier, TrustedSetup, TrustedSetupManager};
 
@@ -116,9 +116,9 @@ pub struct ConsensusConfig {
     pub finality_time: Duration,
     pub max_block_size: usize,
     pub max_transactions_per_block: usize,
-    pub min_validator_stake: u64,
+    pub min_validator_stake: u64, // in ZERO units
     pub slash_percentage: u8,
-    pub reward_per_block: u64,
+    pub reward_per_block: u64, // in PROOF units
     pub epoch_length: u64,
     pub slots_per_epoch: u64,
 }
@@ -160,13 +160,13 @@ impl ConsensusEngine {
         
         let config = ConsensusConfig {
             chain_id: 2025,
-            block_time: Duration::from_secs(12),
+            block_time: Duration::from_secs(5),
             finality_time: Duration::from_millis(2400),
             max_block_size: 1024 * 1024, // 1MB
             max_transactions_per_block: 10000,
-            min_validator_stake: 10000,
+            min_validator_stake: 32 * ZERO_PER_POAR, // 32 POAR minimum stake
             slash_percentage: 5,
-            reward_per_block: 100,
+            reward_per_block: 100, // 100 PROOF per block
             epoch_length: 32,
             slots_per_epoch: 32,
         };

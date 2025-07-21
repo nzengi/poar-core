@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, BTreeMap};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::types::{Hash, Address, Signature};
+use crate::types::{Hash, Address, Signature, Poar, Proof, Valid, Zero, TokenUnit};
 
 /// POAR transaction with ZK-proof support
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -15,9 +15,9 @@ pub struct Transaction {
     pub from: Address,
     /// Receiver address
     pub to: Address,
-    /// Amount to transfer (in smallest unit)
+    /// Amount to transfer (in ZERO units - smallest unit)
     pub amount: u64,
-    /// Transaction fee (in smallest unit)
+    /// Transaction fee (in ZERO units - smallest unit)
     pub fee: u64,
     /// Gas limit for execution
     pub gas_limit: u64,
@@ -51,7 +51,7 @@ pub struct TransactionInput {
 /// Transaction output for UTXO model
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransactionOutput {
-    /// Amount in this output
+    /// Amount in this output (in ZERO units)
     pub amount: u64,
     /// Public key script (recipient)
     pub pubkey_script: Vec<u8>,
@@ -147,8 +147,8 @@ impl Transaction {
     pub fn new(
         from: Address,
         to: Address,
-        amount: u64,
-        fee: u64,
+        amount: u64, // in ZERO units
+        fee: u64,    // in ZERO units
         gas_limit: u64,
         gas_price: u64,
         nonce: u64,
@@ -257,7 +257,7 @@ impl Transaction {
             return TransactionValidationResult::InvalidNonce;
         }
 
-        // Check balance (amount + fee)
+        // Check balance (amount + fee) - both in ZERO units
         let total_cost = self.amount + self.fee;
         if sender_balance < total_cost {
             return TransactionValidationResult::InsufficientBalance;

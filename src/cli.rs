@@ -278,7 +278,7 @@ impl PoarCli {
         // Start the node
         println!("✅ Node initialized successfully");
         println!("🔗 Chain ID: 2025");
-        println!("⏱️  Block time: 12 seconds");
+        println!("⏱️  Block time: 5 seconds");
         println!("🎯 Finality: 2.4 seconds target");
         
         // Keep the node running

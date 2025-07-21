@@ -574,7 +574,7 @@ pub async fn get_blocks(
             hash: format!("0x{:064x}", i),
             number: i as u64 + 1000000,
             parent_hash: format!("0x{:064x}", i.saturating_sub(1)),
-            timestamp: now_timestamp() - (i as u64 * 12), // 12 second blocks
+                            timestamp: now_timestamp() - (i as u64 * 5), // 5 second blocks
             miner: "0x742d35Cc6646C0532631a6f4E76b5Ca3D70eeE8f".to_string(),
             gas_limit: 30000000,
             gas_used: 21000,

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::storage::state_storage::StateStorage;
 use crate::network::P2PNetworkManager;
+use crate::types::{Poar, Proof, Valid, Zero, TokenUnit, TokenUtils};
 
 /// Comprehensive wallet service that integrates all wallet components
 pub struct WalletService {
@@ -215,10 +216,32 @@ impl WalletService {
         Ok(hash)
     }
 
-    /// Get wallet balance
-    pub async fn get_balance(&self) -> u64 {
+    /// Get wallet balance in POAR units
+    pub async fn get_balance(&self) -> Poar {
         let wallet = self.hd_wallet.read().await;
-        wallet.get_total_balance()
+        let balance_in_zero = wallet.get_total_balance();
+        Zero::new(balance_in_zero).to_poar()
+    }
+
+    /// Get wallet balance in PROOF units
+    pub async fn get_balance_proof(&self) -> Proof {
+        let wallet = self.hd_wallet.read().await;
+        let balance_in_zero = wallet.get_total_balance();
+        Zero::new(balance_in_zero).to_proof()
+    }
+
+    /// Get wallet balance in VALID units
+    pub async fn get_balance_valid(&self) -> Valid {
+        let wallet = self.hd_wallet.read().await;
+        let balance_in_zero = wallet.get_total_balance();
+        Zero::new(balance_in_zero).to_valid()
+    }
+
+    /// Get wallet balance in ZERO units (raw)
+    pub async fn get_balance_zero(&self) -> Zero {
+        let wallet = self.hd_wallet.read().await;
+        let balance_in_zero = wallet.get_total_balance();
+        Zero::new(balance_in_zero)
     }
 
     /// List all accounts

@@ -387,7 +387,7 @@ impl Default for BlockValidationContext {
             max_transactions_per_block: 10000,
             max_gas_limit: 30_000_000, // 30M gas
             genesis_timestamp: 1640995200, // 2022-01-01
-            block_time_target: 12, // 12 seconds
+            block_time_target: 5, // 5 seconds
         }
     }
 }

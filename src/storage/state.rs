@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use crate::types::{Hash, Address, Transaction};
+use crate::types::{Hash, Address, Transaction, Poar, Proof, Valid, Zero, TokenUnit, TokenUtils};
 
 /// Account state in POAR blockchain
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AccountState {
-    /// Account balance in smallest units
+    /// Account balance in ZERO units (smallest unit)
     pub balance: u64,
     /// Transaction nonce (number of transactions sent)
     pub nonce: u64,
@@ -171,9 +171,27 @@ impl GlobalState {
         self.accounts.write().unwrap().insert(address, state);
     }
 
-    /// Get account balance
+    /// Get account balance in ZERO units
     pub fn get_balance(&self, address: &Address) -> u64 {
         self.get_account(address).map(|acc| acc.balance).unwrap_or(0)
+    }
+
+    /// Get account balance in POAR units
+    pub fn get_balance_poar(&self, address: &Address) -> Poar {
+        let balance_in_zero = self.get_balance(address);
+        Zero::new(balance_in_zero).to_poar()
+    }
+
+    /// Get account balance in PROOF units
+    pub fn get_balance_proof(&self, address: &Address) -> Proof {
+        let balance_in_zero = self.get_balance(address);
+        Zero::new(balance_in_zero).to_proof()
+    }
+
+    /// Get account balance in VALID units
+    pub fn get_balance_valid(&self, address: &Address) -> Valid {
+        let balance_in_zero = self.get_balance(address);
+        Zero::new(balance_in_zero).to_valid()
     }
 
     /// Get account nonce
