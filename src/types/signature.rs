@@ -67,14 +67,14 @@ impl Signature {
         match kind {
             SignatureKind::Ed25519 => {
                 if bytes.len() != ED25519_SIGNATURE_SIZE {
-                    return Err(POARError::CryptographicError(
+            return Err(POARError::CryptographicError(
                         format!("Invalid Ed25519 signature length: expected {}, got {}", ED25519_SIGNATURE_SIZE, bytes.len())
-                    ));
-                }
+            ));
+        }
                 let mut arr = [0u8; ED25519_SIGNATURE_SIZE];
                 arr.copy_from_slice(bytes);
                 Ok(Signature::Ed25519(arr))
-            }
+    }
             SignatureKind::Falcon => {
                 let sig: FalconSignature = bincode::deserialize(bytes)
                     .map_err(|_| POARError::CryptographicError("Invalid Falcon signature bytes".to_string()))?;
@@ -97,12 +97,12 @@ impl Signature {
             (Signature::Ed25519(bytes), PublicKey::Ed25519(pk_bytes)) => {
                 let ed25519_sig = Ed25519Signature::from_bytes(bytes);
                 let ed25519_pk = VerifyingKey::from_bytes(pk_bytes)
-                    .map_err(|e| POARError::CryptographicError(format!("Invalid public key: {}", e)))?;
-                match ed25519_pk.verify_strict(message, &ed25519_sig) {
-                    Ok(()) => Ok(true),
-                    Err(_) => Ok(false),
-                }
-            }
+            .map_err(|e| POARError::CryptographicError(format!("Invalid public key: {}", e)))?;
+        match ed25519_pk.verify_strict(message, &ed25519_sig) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
             (Signature::Falcon(sig), PublicKey::Falcon(_pk_bytes)) => {
                 let manager = FalconSignatureManager::new(FalconConfig::default());
                 manager.verify(sig, message)
@@ -123,10 +123,10 @@ impl PublicKey {
         match kind {
             SignatureKind::Ed25519 => {
                 if bytes.len() != ED25519_PUBLIC_KEY_SIZE {
-                    return Err(POARError::CryptographicError(
+            return Err(POARError::CryptographicError(
                         format!("Invalid Ed25519 public key length: expected {}, got {}", ED25519_PUBLIC_KEY_SIZE, bytes.len())
-                    ));
-                }
+            ));
+        }
                 let mut arr = [0u8; ED25519_PUBLIC_KEY_SIZE];
                 arr.copy_from_slice(bytes);
                 Ok(PublicKey::Ed25519(arr))
@@ -163,14 +163,14 @@ impl PrivateKey {
         match kind {
             SignatureKind::Ed25519 => {
                 if bytes.len() != ED25519_PRIVATE_KEY_SIZE {
-                    return Err(POARError::CryptographicError(
+            return Err(POARError::CryptographicError(
                         format!("Invalid Ed25519 private key length: expected {}, got {}", ED25519_PRIVATE_KEY_SIZE, bytes.len())
-                    ));
-                }
+            ));
+        }
                 let mut arr = [0u8; ED25519_PRIVATE_KEY_SIZE];
                 arr.copy_from_slice(bytes);
                 Ok(PrivateKey::Ed25519(arr))
-            }
+    }
             SignatureKind::Falcon => Ok(PrivateKey::Falcon(bytes.to_vec())),
             SignatureKind::XMSS => Ok(PrivateKey::XMSS(bytes.to_vec())),
             SignatureKind::AggregatedHashBasedMultiSig(_) => {

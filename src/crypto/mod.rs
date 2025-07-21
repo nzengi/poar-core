@@ -13,6 +13,6 @@ pub use hash::*;
 pub use signature::*;
 pub use zk_proof::*;
 pub use poseidon::*;
-pub use falcon::*;
+pub use falcon::*; 
 pub use xmss::*;
 pub use hash_based_multi_sig::*; 

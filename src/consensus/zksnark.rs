@@ -216,6 +216,24 @@ impl PoarProver {
         Ok(results)
     }
     
+    /// Generate proof for a specific circuit type and proof system
+    pub fn prove_with_system<R: Rng>(
+        &self,
+        system: crate::types::proof::ProofSystem,
+        circuit_type: CircuitType,
+        circuit: Box<dyn ConstraintSynthesizer<Fr>>,
+        rng: &mut R,
+    ) -> Result<ZKProof, ZKError> {
+        match system {
+            crate::types::proof::ProofSystem::Groth16 => self.prove(circuit_type, circuit, rng),
+            crate::types::proof::ProofSystem::Plonk => Err(ZKError::ProofError("Plonk not implemented".to_string())),
+            crate::types::proof::ProofSystem::Nova => Err(ZKError::ProofError("Nova not implemented".to_string())),
+            crate::types::proof::ProofSystem::FRI => Err(ZKError::ProofError("FRI not implemented".to_string())),
+            crate::types::proof::ProofSystem::STU => Err(ZKError::ProofError("STU not implemented".to_string())),
+            crate::types::proof::ProofSystem::WHIR => Err(ZKError::ProofError("WHIR not implemented".to_string())),
+        }
+    }
+    
     /// Serialize Groth16 proof to POAR format
     fn serialize_proof(&self, proof: Proof<Bls12_381>) -> Result<ZKProof, ZKError> {
         // Serialize proof to bytes (288 bytes for Groth16)
@@ -320,6 +338,24 @@ impl PoarVerifier {
         self.update_verifier_metrics(verification_time, is_valid);
         
         Ok(is_valid)
+    }
+    
+    /// Verify a ZK proof for a specific proof system
+    pub fn verify_with_system(
+        &self,
+        system: crate::types::proof::ProofSystem,
+        circuit_type: CircuitType,
+        proof: &ZKProof,
+        public_inputs: &[Fr],
+    ) -> Result<bool, ZKError> {
+        match system {
+            crate::types::proof::ProofSystem::Groth16 => self.verify(circuit_type, proof, public_inputs),
+            crate::types::proof::ProofSystem::Plonk => Err(ZKError::VerificationError("Plonk not implemented".to_string())),
+            crate::types::proof::ProofSystem::Nova => Err(ZKError::VerificationError("Nova not implemented".to_string())),
+            crate::types::proof::ProofSystem::FRI => Err(ZKError::VerificationError("FRI not implemented".to_string())),
+            crate::types::proof::ProofSystem::STU => Err(ZKError::VerificationError("STU not implemented".to_string())),
+            crate::types::proof::ProofSystem::WHIR => Err(ZKError::VerificationError("WHIR not implemented".to_string())),
+        }
     }
     
     /// Verify block validity proof

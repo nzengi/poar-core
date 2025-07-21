@@ -2,36 +2,100 @@
 
 use crate::crypto::xmss::XMSSSignature;
 use serde::{Serialize, Deserialize};
+use sha2::{Sha256, Digest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregatedSignature {
     pub root_hash: Vec<u8>,
     pub signatures: Vec<XMSSSignature>,
     pub public_keys: Vec<Vec<u8>>,
+    pub merkle_proofs: Vec<Vec<Vec<u8>>>, // Each signature's Merkle path
+}
+
+fn hash_leaf(sig: &XMSSSignature) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(&sig.signature);
+    hasher.update(&sig.public_key);
+    hasher.finalize().to_vec()
+}
+
+fn merkle_tree(leaves: &[Vec<u8>]) -> (Vec<u8>, Vec<Vec<Vec<u8>>>) {
+    // Returns (root, proofs for each leaf)
+    let mut tree = Vec::new();
+    let mut current_level = leaves.to_vec();
+    tree.push(current_level.clone());
+    while current_level.len() > 1 {
+        let mut next_level = Vec::new();
+        for i in (0..current_level.len()).step_by(2) {
+            let left = &current_level[i];
+            let right = if i + 1 < current_level.len() { &current_level[i + 1] } else { left };
+            let mut hasher = Sha256::new();
+            hasher.update(left);
+            hasher.update(right);
+            next_level.push(hasher.finalize().to_vec());
+        }
+        current_level = next_level;
+        tree.push(current_level.clone());
+    }
+    // Build proofs for each leaf
+    let mut proofs = vec![Vec::new(); leaves.len()];
+    for (i, _) in leaves.iter().enumerate() {
+        let mut idx = i;
+        let mut path = Vec::new();
+        for level in &tree[..tree.len() - 1] {
+            let sibling = if idx % 2 == 0 {
+                if idx + 1 < level.len() { &level[idx + 1] } else { &level[idx] }
+            } else {
+                &level[idx - 1]
+            };
+            path.push(sibling.clone());
+            idx /= 2;
+        }
+        proofs[i] = path;
+    }
+    (tree.last().unwrap()[0].clone(), proofs)
 }
 
 pub fn aggregate_signatures(signatures: &[XMSSSignature]) -> AggregatedSignature {
-    // Placeholder: hash-tree aggregation (gerçek algoritma ile değiştirilecek)
-    let mut root_hash = vec![0u8; 32];
-    for sig in signatures {
-        for b in &sig.signature {
-            root_hash[0] ^= *b; // Basit XOR, gerçek hash-tree ile değiştirilecek
-        }
-    }
+    let leaves: Vec<Vec<u8>> = signatures.iter().map(hash_leaf).collect();
+    let (root_hash, merkle_proofs) = merkle_tree(&leaves);
     AggregatedSignature {
         root_hash,
         signatures: signatures.to_vec(),
         public_keys: signatures.iter().map(|s| s.public_key.clone()).collect(),
+        merkle_proofs,
     }
 }
 
+fn verify_merkle_proof(leaf: &[u8], proof: &[Vec<u8>], root: &[u8], index: usize) -> bool {
+    let mut hash = leaf.to_vec();
+    let mut idx = index;
+    for sibling in proof {
+        let mut hasher = Sha256::new();
+        if idx % 2 == 0 {
+            hasher.update(&hash);
+            hasher.update(sibling);
+        } else {
+            hasher.update(sibling);
+            hasher.update(&hash);
+        }
+        hash = hasher.finalize().to_vec();
+        idx /= 2;
+    }
+    hash == root
+}
+
 pub fn verify_aggregated_signature(message: &[u8], agg_sig: &AggregatedSignature, public_keys: &[Vec<u8>]) -> bool {
-    // Placeholder: Her imzayı tek tek doğrula, gerçek toplu doğrulama ile değiştirilecek
     if agg_sig.public_keys != public_keys {
         return false;
     }
-    for sig in &agg_sig.signatures {
+    for (i, sig) in agg_sig.signatures.iter().enumerate() {
         if !crate::crypto::xmss::XMSS::verify(message, sig) {
+            return false;
+        }
+        let leaf = hash_leaf(sig);
+        let proof = &agg_sig.merkle_proofs[i];
+        if !verify_merkle_proof(&leaf, proof, &agg_sig.root_hash, i) {
             return false;
         }
     }

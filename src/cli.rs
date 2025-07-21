@@ -5,7 +5,7 @@ mod types;
 use wallet::hd_wallet::HDWallet;
 use types::{SignatureKind, Transaction};
 use std::fs;
-use serde_json;
+use crate::types::signature::SignatureKind;
 
 /// CLI commands for POAR node
 pub struct PoarCli;
@@ -226,6 +226,13 @@ impl PoarCli {
                                     .value_name("TYPE")
                                     .help("Circuit type (block, transaction, state)")
                                     .required(true),
+                            )
+                            .arg(
+                                Arg::new("system")
+                                    .long("system")
+                                    .value_name("PROOF_SYSTEM")
+                                    .help("Proof system (groth16, fri, stu, whir)")
+                                    .required(false),
                             ),
                     )
                     .subcommand(
@@ -238,6 +245,13 @@ impl PoarCli {
                                     .value_name("FILE")
                                     .help("Proof file")
                                     .required(true),
+                            )
+                            .arg(
+                                Arg::new("system")
+                                    .long("system")
+                                    .value_name("PROOF_SYSTEM")
+                                    .help("Proof system (groth16, fri, stu, whir)")
+                                    .required(false),
                             ),
                     )
                     .subcommand(
@@ -305,6 +319,71 @@ impl PoarCli {
                     .subcommand(Command::new("swagger").about("Show Swagger UI information"))
                     .subcommand(Command::new("metrics").about("Show API metrics")),
             )
+            .subcommand(
+                Command::new("dev")
+                    .about("Developer and blueprint tools")
+                    .subcommand(
+                        Command::new("blueprint-export")
+                            .about("Export all circuit constraint blueprints (Lean 4 format)")
+                            .arg(
+                                Arg::new("lean4")
+                                    .long("lean4")
+                                    .help("Export in Lean 4 format")
+                                    .action(clap::ArgAction::SetTrue),
+                            )
+                            .arg(
+                                Arg::new("output")
+                                    .long("output")
+                                    .value_name("FILE")
+                                    .help("Output file path")
+                                    .required(false),
+                            ),
+                    ),
+            )
+            .subcommand(
+                Command::new("zkvm")
+                    .about("Zero-Knowledge Virtual Machine operations")
+                    .subcommand(
+                        Command::new("run")
+                            .about("Run a zkVM program")
+                            .arg(
+                                Arg::new("program")
+                                    .long("program")
+                                    .value_name("FILE")
+                                    .help("zkVM program file path")
+                                    .required(true),
+                            ),
+                    )
+                    .subcommand(
+                        Command::new("benchmark")
+                            .about("Benchmark zkVM program execution and proof generation")
+                            .arg(
+                                Arg::new("program")
+                                    .long("program")
+                                    .value_name("FILE")
+                                    .help("zkVM program file path")
+                                    .required(true),
+                            ),
+                    )
+                    .subcommand(
+                        Command::new("export-trace")
+                            .about("Export zkVM execution trace to file")
+                            .arg(
+                                Arg::new("program")
+                                    .long("program")
+                                    .value_name("FILE")
+                                    .help("zkVM program file path")
+                                    .required(true),
+                            )
+                            .arg(
+                                Arg::new("output")
+                                    .long("output")
+                                    .value_name("FILE")
+                                    .help("Output file path")
+                                    .required(true),
+                            ),
+                    ),
+            ),
     }
 
     /// Handle CLI commands
@@ -315,6 +394,8 @@ impl PoarCli {
             Some(("validator", sub_matches)) => Self::handle_validator_command(sub_matches).await,
             Some(("chain", sub_matches)) => Self::handle_chain_command(sub_matches).await,
             Some(("zk", sub_matches)) => Self::handle_zk_command(sub_matches).await,
+            Some(("zkvm", sub_matches)) => Self::handle_zkvm_command(sub_matches).await,
+            Some(("dev", sub_matches)) => Self::handle_dev_command(sub_matches).await,
             Some(("storage", sub_matches)) => Self::handle_storage_command(sub_matches).await,
             Some(("network", sub_matches)) => Self::handle_network_command(sub_matches).await,
             Some(("api", sub_matches)) => Self::handle_api_command(sub_matches).await,
@@ -875,6 +956,12 @@ impl PoarCli {
                     _ => false
                 };
                 println!("[CLI] Aggregated XMSS signature verification: {}", result);
+            }
+            Some(("dev", sub_matches)) => {
+                Self::handle_dev_command(sub_matches).await
+            }
+            Some(("zkvm", sub_matches)) => {
+                Self::handle_zkvm_command(sub_matches).await
             }
             _ => println!("Use 'wallet --help' for usage information"),
         }
@@ -2278,6 +2365,53 @@ impl PoarCli {
                 println!("   Service Restarts: 0");
             }
             _ => println!("Use 'api --help' for usage information"),
+        }
+        Ok(())
+    }
+
+    /// Handle dev command
+    async fn handle_dev_command(matches: &ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
+        match matches.subcommand() {
+            Some(("blueprint-export", sub_matches)) => {
+                let lean4 = sub_matches.get_flag("lean4");
+                let output = sub_matches.get_one::<String>("output");
+                let blueprint = if lean4 {
+                    crate::consensus::circuits::BlueprintExporter::export_as_lean4_blueprint()
+                } else {
+                    format!("{:?}", crate::consensus::circuits::BlueprintExporter::export_all_constraints())
+                };
+                if let Some(path) = output {
+                    std::fs::write(path, &blueprint)?;
+                    println!("[CLI] Blueprint exported to {}", path);
+                } else {
+                    println!("{}", blueprint);
+                }
+            }
+            _ => println!("Use 'dev --help' for usage information"),
+        }
+        Ok(())
+    }
+
+    /// Handle zkvm command
+    async fn handle_zkvm_command(matches: &ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
+        match matches.subcommand() {
+            Some(("run", sub_matches)) => {
+                let program = sub_matches.get_one::<String>("program").unwrap();
+                println!("[CLI] Running zkVM program: {}", program);
+                // TODO: Load and execute zkVM program
+            }
+            Some(("benchmark", sub_matches)) => {
+                let program = sub_matches.get_one::<String>("program").unwrap();
+                println!("[CLI] Benchmarking zkVM program: {}", program);
+                // TODO: Benchmark zkVM program
+            }
+            Some(("export-trace", sub_matches)) => {
+                let program = sub_matches.get_one::<String>("program").unwrap();
+                let output = sub_matches.get_one::<String>("output").unwrap();
+                println!("[CLI] Exporting zkVM execution trace for program {} to {}", program, output);
+                // TODO: Export zkVM execution trace
+            }
+            _ => println!("Use 'zkvm --help' for usage information"),
         }
         Ok(())
     }

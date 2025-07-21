@@ -18,6 +18,12 @@ pub enum ProofSystem {
     Plonk,
     /// Nova - Recursive proofs, future upgrade
     Nova,
+    /// FRI - Fast Reed-Solomon Interactive Oracle Proofs of Proximity
+    FRI,
+    /// STU - STIR/FRI/WHIR style proof (placeholder)
+    STU,
+    /// WHIR - WHIR interactive proof system (placeholder)
+    WHIR,
 }
 
 impl fmt::Display for ProofSystem {
@@ -26,6 +32,9 @@ impl fmt::Display for ProofSystem {
             ProofSystem::Groth16 => write!(f, "Groth16"),
             ProofSystem::Plonk => write!(f, "Plonk"),
             ProofSystem::Nova => write!(f, "Nova"),
+            ProofSystem::FRI => write!(f, "FRI"),
+            ProofSystem::STU => write!(f, "STU"),
+            ProofSystem::WHIR => write!(f, "WHIR"),
         }
     }
 }
@@ -68,6 +77,9 @@ impl ZKProof {
             ProofSystem::Groth16 => self.verify_groth16(vk),
             ProofSystem::Plonk => Err(POARError::InvalidZKProof("Plonk not implemented".to_string())),
             ProofSystem::Nova => Err(POARError::InvalidZKProof("Nova not implemented".to_string())),
+            ProofSystem::FRI => Err(POARError::InvalidZKProof("FRI not implemented".to_string())),
+            ProofSystem::STU => Err(POARError::InvalidZKProof("STU not implemented".to_string())),
+            ProofSystem::WHIR => Err(POARError::InvalidZKProof("WHIR not implemented".to_string())),
         }
     }
     
@@ -93,6 +105,9 @@ impl ZKProof {
             ProofSystem::Groth16 => self.proof_data.len() == crate::types::POAR_ZK_PROOF_SIZE,
             ProofSystem::Plonk => true, // Variable size
             ProofSystem::Nova => true,  // Variable size
+            ProofSystem::FRI => true,   // Variable size
+            ProofSystem::STU => true,   // Variable size
+            ProofSystem::WHIR => true,  // Variable size
         }
     }
 }

@@ -360,17 +360,17 @@ impl HDWallet {
     pub fn sign_transaction_with_kind(&self, account_index: u32, address_index: u32, transaction: &Transaction, kind: SignatureKind) -> Result<crate::types::Signature, WalletError> {
         match kind {
             SignatureKind::Ed25519 => {
-                let account = self.get_account(account_index)?;
-                let address = account.addresses.get(&address_index)
-                    .ok_or(WalletError::AddressNotFound(address_index))?;
-                let private_key = KeyDerivation::derive_private_key(
-                    &account.extended_private_key,
-                    address.address_type.clone(),
-                    address_index,
-                )?;
-                let tx_hash = transaction.hash();
+        let account = self.get_account(account_index)?;
+        let address = account.addresses.get(&address_index)
+            .ok_or(WalletError::AddressNotFound(address_index))?;
+        let private_key = KeyDerivation::derive_private_key(
+            &account.extended_private_key,
+            address.address_type.clone(),
+            address_index,
+        )?;
+        let tx_hash = transaction.hash();
                 let signing_key = k256::ecdsa::SigningKey::from(private_key);
-                let signature = signing_key.sign(&tx_hash.0);
+        let signature = signing_key.sign(&tx_hash.0);
                 Ok(crate::types::Signature::Ed25519(signature.to_bytes()))
             }
             SignatureKind::Falcon => {
@@ -633,7 +633,7 @@ impl AddressUtils {
         if !address.starts_with("0x") || address.len() != 42 {
             return false;
         }
-
+        
         let address = &address[2..]; // Remove 0x prefix
         let mut hasher = Keccak256::new();
         hasher.update(address.to_lowercase().as_bytes());
