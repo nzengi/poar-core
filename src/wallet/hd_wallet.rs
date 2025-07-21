@@ -7,6 +7,11 @@ use serde::{Serialize, Deserialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use rand_core::OsRng;
 use crate::types::{Hash, Address, Transaction};
+use crate::crypto::falcon::{FalconSignatureManager, FalconConfig, FalconKeyPair};
+use crate::types::signature::SignatureKind;
+use crate::crypto::xmss::{XMSS, XMSSKeyPair, XMSSConfig, XMSSSignature};
+use sha3::{Keccak256, Digest};
+use crate::crypto::hash_based_multi_sig::{AggregatedSignature, aggregate_signatures, verify_aggregated_signature};
 
 /// HD Wallet implementing BIP32/44/39 standards
 #[derive(Debug)]
@@ -23,6 +28,10 @@ pub struct HDWallet {
     address_book: HashMap<Address, AddressEntry>,
     /// Transaction history
     transaction_history: Vec<TransactionRecord>,
+    /// Falcon keypairs (index -> keypair)
+    pub falcon_keypairs: HashMap<u32, FalconKeyPair>,
+    /// XMSS keypairs (index -> keypair)
+    pub xmss_keypairs: HashMap<u32, XMSSKeyPair>,
 }
 
 /// Wallet configuration
@@ -182,25 +191,16 @@ pub struct KeyDerivation;
 pub struct AddressUtils;
 
 /// Wallet errors
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum WalletError {
-    #[error("Invalid mnemonic: {0}")]
     InvalidMnemonic(String),
-    #[error("Derivation error: {0}")]
     DerivationError(String),
-    #[error("Account not found: {0}")]
     AccountNotFound(u32),
-    #[error("Address not found at index: {0}")]
     AddressNotFound(u32),
-    #[error("Insufficient funds: required {required}, available {available}")]
     InsufficientFunds { required: u64, available: u64 },
-    #[error("Invalid signature")]
     InvalidSignature,
-    #[error("Encryption error: {0}")]
     EncryptionError(String),
-    #[error("Storage error: {0}")]
     StorageError(String),
-    #[error("Hardware wallet error: {0}")]
     HardwareWalletError(String),
 }
 
@@ -223,7 +223,7 @@ impl HDWallet {
 
         // Generate seed from mnemonic
         let passphrase = params.passphrase.as_deref().unwrap_or("");
-        let seed = Seed::new(&mnemonic, passphrase);
+        let seed = bip39::Seed::new(&mnemonic, passphrase);
 
         // Derive master key
         let master_key = ExtendedPrivateKey::new(seed.as_bytes())
@@ -238,6 +238,8 @@ impl HDWallet {
             accounts: HashMap::new(),
             address_book: HashMap::new(),
             transaction_history: Vec::new(),
+            falcon_keypairs: HashMap::new(),
+            xmss_keypairs: HashMap::new(),
         };
 
         // Create default account
@@ -341,28 +343,53 @@ impl HDWallet {
         Ok(account.addresses.values().collect())
     }
 
-    /// Sign transaction with specified address
-    pub fn sign_transaction(&self, account_index: u32, address_index: u32, transaction: &Transaction) -> Result<Signature, WalletError> {
-        let account = self.get_account(account_index)?;
-        let address = account.addresses.get(&address_index)
-            .ok_or(WalletError::AddressNotFound(address_index))?;
+    /// Generate Falcon keypair for account (returns index)
+    pub fn generate_falcon_keypair(&mut self, index: u32) -> u32 {
+        let mut manager = FalconSignatureManager::new(FalconConfig::default());
+        let keypair = manager.generate_key_pair();
+        self.falcon_keypairs.insert(index, keypair);
+        index
+    }
 
-        // Derive private key for this address
-        let private_key = KeyDerivation::derive_private_key(
-            &account.extended_private_key,
-            address.address_type.clone(),
-            address_index,
-        )?;
+    /// Get Falcon public key for index
+    pub fn get_falcon_public_key(&self, index: u32) -> Option<&Vec<u8>> {
+        self.falcon_keypairs.get(&index).map(|kp| &kp.public_key)
+    }
 
-        // Create transaction hash for signing
-        let tx_hash = transaction.hash();
-        
-        // Sign the transaction hash
-        let signing_key = SigningKey::from(private_key);
-        let signature = signing_key.sign(&tx_hash.0);
-
-        println!("✍️  Transaction signed with address: {}", address.address);
-        Ok(signature)
+    /// Sign transaction with specified address or Falcon keypair
+    pub fn sign_transaction_with_kind(&self, account_index: u32, address_index: u32, transaction: &Transaction, kind: SignatureKind) -> Result<crate::types::Signature, WalletError> {
+        match kind {
+            SignatureKind::Ed25519 => {
+                let account = self.get_account(account_index)?;
+                let address = account.addresses.get(&address_index)
+                    .ok_or(WalletError::AddressNotFound(address_index))?;
+                let private_key = KeyDerivation::derive_private_key(
+                    &account.extended_private_key,
+                    address.address_type.clone(),
+                    address_index,
+                )?;
+                let tx_hash = transaction.hash();
+                let signing_key = k256::ecdsa::SigningKey::from(private_key);
+                let signature = signing_key.sign(&tx_hash.0);
+                Ok(crate::types::Signature::Ed25519(signature.to_bytes()))
+            }
+            SignatureKind::Falcon => {
+                let keypair = self.falcon_keypairs.get(&address_index)
+                    .ok_or(WalletError::AddressNotFound(address_index))?;
+                let tx_hash = transaction.hash();
+                let manager = FalconSignatureManager::new(FalconConfig::default());
+                let sig = manager.sign(&tx_hash.0, &keypair.private_key)
+                    .map_err(|_| WalletError::InvalidSignature)?;
+                Ok(crate::types::Signature::Falcon(sig))
+            }
+            SignatureKind::XMSS => {
+                let keypair = self.xmss_keypairs.get(&address_index)
+                    .ok_or(WalletError::AddressNotFound(address_index))?;
+                let tx_hash = transaction.hash();
+                let sig = XMSS::sign(&tx_hash.0, &keypair.private_key);
+                Ok(crate::types::Signature::XMSS(sig))
+            }
+        }
     }
 
     /// Add entry to address book
@@ -448,6 +475,73 @@ impl HDWallet {
     pub fn get_config(&self) -> &WalletConfig {
         &self.config
     }
+
+    /// Create and store a new Falcon keypair, returning its index
+    pub fn create_and_store_falcon_keypair(&mut self) -> u32 {
+        let mut manager = FalconSignatureManager::new(FalconConfig::default());
+        let keypair = manager.generate_key_pair();
+        // Index olarak mevcut map'teki en büyük index + 1 kullanılır
+        let new_index = if let Some(max) = self.falcon_keypairs.keys().max() {
+            max + 1
+        } else {
+            0
+        };
+        self.falcon_keypairs.insert(new_index, keypair);
+        new_index
+    }
+
+    /// Sign a transaction with a Falcon keypair by index
+    pub fn sign_transaction_falcon(&self, falcon_index: u32, transaction: &Transaction) -> Result<crate::types::Signature, WalletError> {
+        let keypair = self.falcon_keypairs.get(&falcon_index)
+            .ok_or(WalletError::AddressNotFound(falcon_index))?;
+        let tx_hash = transaction.hash();
+        let manager = FalconSignatureManager::new(FalconConfig::default());
+        let sig = manager.sign(&tx_hash.0, &keypair.private_key)
+            .map_err(|_| WalletError::InvalidSignature)?;
+        Ok(crate::types::Signature::Falcon(sig))
+    }
+
+    /// Create and store a new XMSS keypair, returning its index
+    pub fn create_and_store_xmss_keypair(&mut self) -> u32 {
+        let config = XMSSConfig::default();
+        let keypair = XMSS::generate_keypair(&config);
+        let new_index = if let Some(max) = self.xmss_keypairs.keys().max() {
+            max + 1
+        } else {
+            0
+        };
+        self.xmss_keypairs.insert(new_index, keypair);
+        new_index
+    }
+
+    /// Sign a transaction with an XMSS keypair by index
+    pub fn sign_transaction_xmss(&self, xmss_index: u32, transaction: &Transaction) -> Result<crate::types::Signature, WalletError> {
+        let keypair = self.xmss_keypairs.get(&xmss_index)
+            .ok_or(WalletError::AddressNotFound(xmss_index))?;
+        let tx_hash = transaction.hash();
+        let sig = XMSS::sign(&tx_hash.0, &keypair.private_key);
+        Ok(crate::types::Signature::XMSS(sig))
+    }
+
+    /// Aggregate XMSS signatures for a transaction
+    pub fn aggregate_xmss_signatures(&self, indices: &[u32], transaction: &Transaction) -> crate::types::Signature {
+        let tx_hash = transaction.hash();
+        let mut sigs = Vec::new();
+        for &i in indices {
+            if let Some(kp) = self.xmss_keypairs.get(&i) {
+                let sig = crate::crypto::xmss::XMSS::sign(&tx_hash.0, &kp.private_key);
+                sigs.push(sig);
+            }
+        }
+        let agg = aggregate_signatures(&sigs);
+        crate::types::Signature::AggregatedHashBasedMultiSig(agg)
+    }
+
+    /// Verify an aggregated signature for a transaction
+    pub fn verify_aggregated_signature(&self, agg_sig: &AggregatedSignature, transaction: &Transaction, public_keys: &[Vec<u8>]) -> bool {
+        let tx_hash = transaction.hash();
+        verify_aggregated_signature(&tx_hash.0, agg_sig, public_keys)
+    }
 }
 
 impl KeyDerivation {
@@ -518,8 +612,6 @@ impl KeyDerivation {
 impl AddressUtils {
     /// Convert public key to Ethereum address
     pub fn public_key_to_address(public_key: &VerifyingKey) -> Address {
-        use keccak::{Keccak256, Digest};
-
         // Get uncompressed public key bytes (remove 0x04 prefix)
         let public_key_bytes = public_key.to_encoded_point(false);
         let public_key_bytes = &public_key_bytes.as_bytes()[1..]; // Remove 0x04 prefix
@@ -542,8 +634,6 @@ impl AddressUtils {
             return false;
         }
 
-        use keccak::{Keccak256, Digest};
-        
         let address = &address[2..]; // Remove 0x prefix
         let mut hasher = Keccak256::new();
         hasher.update(address.to_lowercase().as_bytes());

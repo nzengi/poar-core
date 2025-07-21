@@ -1,5 +1,11 @@
 use clap::{Arg, Command, ArgMatches};
 use std::path::PathBuf;
+mod wallet;
+mod types;
+use wallet::hd_wallet::HDWallet;
+use types::{SignatureKind, Transaction};
+use std::fs;
+use serde_json;
 
 /// CLI commands for POAR node
 pub struct PoarCli;
@@ -77,7 +83,70 @@ impl PoarCli {
                     .subcommand(Command::new("hardware").about("Hardware wallet operations"))
                     .subcommand(Command::new("backup").about("Backup wallet"))
                     .subcommand(Command::new("restore").about("Restore wallet"))
-                    .subcommand(Command::new("security").about("Security and encryption status")),
+                    .subcommand(Command::new("security").about("Security and encryption status"))
+                    .subcommand(Command::new("falcon-keypair-create").about("Create new Falcon keypair"))
+                    .subcommand(
+                        Command::new("falcon-sign")
+                            .about("Sign transaction with Falcon keypair")
+                            .arg(Arg::new("index")
+                                .long("index")
+                                .value_name("FALCON_INDEX")
+                                .help("Falcon keypair index")
+                                .required(true))
+                            .arg(Arg::new("tx")
+                                .long("tx")
+                                .value_name("TX_JSON_PATH")
+                                .help("Transaction JSON file path")
+                                .required(true))
+                    )
+                    .subcommand(Command::new("xmss-keypair-create").about("Create new XMSS keypair"))
+                    .subcommand(
+                        Command::new("xmss-sign")
+                            .about("Sign transaction with XMSS keypair")
+                            .arg(Arg::new("index")
+                                .long("index")
+                                .value_name("XMSS_INDEX")
+                                .help("XMSS keypair index")
+                                .required(true))
+                            .arg(Arg::new("tx")
+                                .long("tx")
+                                .value_name("TX_JSON_PATH")
+                                .help("Transaction JSON file path")
+                                .required(true))
+                    )
+                    .subcommand(
+                        Command::new("xmss-aggregate-sign")
+                            .about("Aggregate XMSS signatures for a transaction")
+                            .arg(Arg::new("indices")
+                                .long("indices")
+                                .value_name("I1,I2,...")
+                                .help("Comma-separated XMSS keypair indices")
+                                .required(true))
+                            .arg(Arg::new("tx")
+                                .long("tx")
+                                .value_name("TX_JSON_PATH")
+                                .help("Transaction JSON file path")
+                                .required(true))
+                    )
+                    .subcommand(
+                        Command::new("xmss-aggregate-verify")
+                            .about("Verify aggregated XMSS signature for a transaction")
+                            .arg(Arg::new("agg")
+                                .long("agg")
+                                .value_name("AGG_SIG_JSON")
+                                .help("Aggregated signature JSON file path")
+                                .required(true))
+                            .arg(Arg::new("tx")
+                                .long("tx")
+                                .value_name("TX_JSON_PATH")
+                                .help("Transaction JSON file path")
+                                .required(true))
+                            .arg(Arg::new("pubkeys")
+                                .long("pubkeys")
+                                .value_name("PUBKEYS_JSON")
+                                .help("Public keys JSON file path (array of hex strings)")
+                                .required(true))
+                    ),
             )
             .subcommand(
                 Command::new("validator")
@@ -722,6 +791,90 @@ impl PoarCli {
                 println!("   4. ✅ Regular security audits");
                 
                 println!("\n🔒 Security audit passed! Wallet is secure.");
+            }
+            Some(("falcon-keypair-create", _)) => {
+                // HDWallet örneğini yükle (örnek: varsayılan dosyadan veya bellekte)
+                let mut wallet = HDWallet::new(crate::wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: crate::wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let index = wallet.create_and_store_falcon_keypair();
+                println!("[CLI] Falcon keypair created. Index: {}", index);
+            }
+            Some(("falcon-sign", sub_matches)) => {
+                let index: u32 = sub_matches.get_one::<String>("index").unwrap().parse()?;
+                let tx_path = sub_matches.get_one::<String>("tx").unwrap();
+                let tx_json = fs::read_to_string(tx_path)?;
+                let tx: Transaction = serde_json::from_str(&tx_json)?;
+                // HDWallet örneğini yükle (örnek: varsayılan dosyadan veya bellekte)
+                let wallet = HDWallet::new(crate::wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: crate::wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let sig = wallet.sign_transaction_falcon(index, &tx)?;
+                println!("[CLI] Falcon signature: {}", sig);
+            }
+            Some(("xmss-keypair-create", _)) => {
+                let mut wallet = HDWallet::new(wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let index = wallet.create_and_store_xmss_keypair();
+                println!("[CLI] XMSS keypair created. Index: {}", index);
+            }
+            Some(("xmss-sign", sub_matches)) => {
+                let index: u32 = sub_matches.get_one::<String>("index").unwrap().parse()?;
+                let tx_path = sub_matches.get_one::<String>("tx").unwrap();
+                let tx_json = fs::read_to_string(tx_path)?;
+                let tx: Transaction = serde_json::from_str(&tx_json)?;
+                let wallet = HDWallet::new(wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let sig = wallet.sign_transaction_xmss(index, &tx)?;
+                println!("[CLI] XMSS signature: {}", sig);
+            }
+            Some(("xmss-aggregate-sign", sub_matches)) => {
+                let indices_str = sub_matches.get_one::<String>("indices").unwrap();
+                let indices: Vec<u32> = indices_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                let tx_path = sub_matches.get_one::<String>("tx").unwrap();
+                let tx_json = fs::read_to_string(tx_path)?;
+                let tx: Transaction = serde_json::from_str(&tx_json)?;
+                let wallet = HDWallet::new(wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let agg_sig = wallet.aggregate_xmss_signatures(&indices, &tx);
+                let agg_json = serde_json::to_string_pretty(&agg_sig)?;
+                println!("[CLI] Aggregated XMSS signature:\n{}", agg_json);
+            }
+            Some(("xmss-aggregate-verify", sub_matches)) => {
+                let agg_path = sub_matches.get_one::<String>("agg").unwrap();
+                let tx_path = sub_matches.get_one::<String>("tx").unwrap();
+                let pubkeys_path = sub_matches.get_one::<String>("pubkeys").unwrap();
+                let agg_json = fs::read_to_string(agg_path)?;
+                let tx_json = fs::read_to_string(tx_path)?;
+                let pubkeys_json = fs::read_to_string(pubkeys_path)?;
+                let agg_sig: types::Signature = serde_json::from_str(&agg_json)?;
+                let tx: Transaction = serde_json::from_str(&tx_json)?;
+                let pubkeys: Vec<Vec<u8>> = serde_json::from_str(&pubkeys_json)?;
+                let wallet = HDWallet::new(wallet::hd_wallet::WalletParams {
+                    mnemonic: None,
+                    passphrase: None,
+                    config: wallet::hd_wallet::WalletConfig::default(),
+                })?;
+                let result = match agg_sig {
+                    types::Signature::AggregatedHashBasedMultiSig(ref agg) => {
+                        wallet.verify_aggregated_signature(agg, &tx, &pubkeys)
+                    }
+                    _ => false
+                };
+                println!("[CLI] Aggregated XMSS signature verification: {}", result);
             }
             _ => println!("Use 'wallet --help' for usage information"),
         }

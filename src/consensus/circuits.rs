@@ -215,11 +215,28 @@ impl BlockValidityCircuit {
     fn enforce_validator_signature(
         &self,
         cs: ConstraintSystemRef<Fr>,
-        signature: &Signature,
+        signature: &crate::types::Signature,
     ) -> Result<(), SynthesisError> {
-        // Ed25519 signature verification constraints
-        // This would use arkworks Ed25519 gadget
-        Ok(())
+        match signature {
+            crate::types::Signature::Ed25519(_bytes) => {
+                // Ed25519 signature verification constraints
+                // This would use arkworks Ed25519 gadget
+                // Placeholder: Assume valid for now
+                Ok(())
+            }
+            crate::types::Signature::Falcon(_sig) => {
+                // Falcon signature verification constraints
+                // TODO: Implement Falcon ZK gadget (currently placeholder)
+                // Not a real ZK gadget, just a constraint stub
+                Ok(())
+            }
+            crate::types::Signature::XMSS(_sig) => {
+                // XMSS signature verification constraints
+                // TODO: Implement XMSS ZK gadget (currently placeholder)
+                // Not a real ZK gadget, just a constraint stub
+                Ok(())
+            }
+        }
     }
     
     fn enforce_block_limits(
@@ -315,9 +332,31 @@ impl ConstraintSynthesizer<Fr> for MerkleInclusionCircuit {
 
 impl ConstraintSynthesizer<Fr> for SignatureVerificationCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
-        // Ed25519 signature verification constraints
-        // This would use a proper Ed25519 gadget from arkworks
-        Ok(())
+        // Public inputs: message_hash, public_key
+        // Private witness: signature
+        if let (Some(_msg_hash), Some(_pk), Some(sig)) = (self.message_hash, self.public_key, self.signature) {
+            // Select signature type and verify accordingly
+            match sig {
+                crate::types::Signature::Ed25519(_bytes) => {
+                    // Ed25519 ZK gadget (placeholder)
+                    // TODO: Use arkworks Ed25519 gadget
+                    Ok(())
+                }
+                crate::types::Signature::Falcon(_sig) => {
+                    // Falcon ZK gadget (placeholder)
+                    // TODO: Implement Falcon ZK gadget
+                    Ok(())
+                }
+                crate::types::Signature::XMSS(_sig) => {
+                    // XMSS ZK gadget (placeholder)
+                    // TODO: Implement XMSS ZK gadget
+                    Ok(())
+                }
+            }
+        } else {
+            // If any input is missing, skip constraints
+            Ok(())
+        }
     }
 }
 

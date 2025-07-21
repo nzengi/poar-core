@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post, put, delete},
     Router,
 };
+use axum::extract::Json as AxumJson;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +14,9 @@ use utoipa::{OpenApi, ToSchema, IntoParams};
 use validator::Validate;
 use crate::storage::state_storage::StateStorage;
 use crate::network::P2PNetworkManager;
+use crate::wallet::hd_wallet::HDWallet;
+use crate::network::Transaction;
+use crate::crypto::hash_based_multi_sig::AggregatedSignature;
 
 /// REST API server state
 #[derive(Clone)]
@@ -23,6 +27,8 @@ pub struct ApiState {
     pub network_manager: Arc<P2PNetworkManager>,
     /// API metrics
     pub metrics: Arc<RwLock<ApiMetrics>>,
+    /// HDWallet (eklenen alan)
+    pub wallet: Arc<RwLock<HDWallet>>,
 }
 
 /// API metrics tracking
@@ -434,6 +440,14 @@ pub fn create_router(state: ApiState) -> Router {
         
         // Search endpoint
         .route("/search", get(search))
+        
+        // Wallet endpoints
+        .route("/wallet/falcon-keypair", post(falcon_keypair_create))
+        .route("/wallet/falcon-sign", post(falcon_sign_transaction))
+        .route("/wallet/xmss-keypair", post(xmss_keypair_create))
+        .route("/wallet/xmss-sign", post(xmss_sign_transaction))
+        .route("/wallet/xmss-aggregate-sign", post(xmss_aggregate_sign))
+        .route("/wallet/xmss-aggregate-verify", post(xmss_aggregate_verify))
         
         .with_state(state)
 }
@@ -853,6 +867,119 @@ pub async fn get_zk_proof(State(_state): State<ApiState>, Path(_block_hash): Pat
 
 pub async fn search(State(_state): State<ApiState>, Query(_params): Query<HashMap<String, String>>) -> impl IntoResponse {
     Json(ApiResponse { success: true, data: Some(Vec::<String>::new()), error: None, timestamp: now_timestamp(), request_id: generate_request_id() })
+}
+
+#[derive(Deserialize)]
+pub struct FalconSignRequest {
+    pub falcon_index: u32,
+    pub transaction: Transaction,
+}
+
+pub async fn falcon_keypair_create(State(state): State<ApiState>) -> impl IntoResponse {
+    let mut wallet = state.wallet.write().await;
+    let index = wallet.create_and_store_falcon_keypair();
+    AxumJson(ApiResponse {
+        success: true,
+        data: Some(index),
+        error: None,
+        timestamp: now_timestamp(),
+        request_id: generate_request_id(),
+    })
+}
+
+pub async fn falcon_sign_transaction(State(state): State<ApiState>, AxumJson(req): AxumJson<FalconSignRequest>) -> impl IntoResponse {
+    let wallet = state.wallet.read().await;
+    match wallet.sign_transaction_falcon(req.falcon_index, &req.transaction) {
+        Ok(sig) => AxumJson(ApiResponse {
+            success: true,
+            data: Some(format!("{}", sig)),
+            error: None,
+            timestamp: now_timestamp(),
+            request_id: generate_request_id(),
+        }),
+        Err(e) => AxumJson(ApiResponse::<String> {
+            success: false,
+            data: None,
+            error: Some(format!("{}", e)),
+            timestamp: now_timestamp(),
+            request_id: generate_request_id(),
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct XmssSignRequest {
+    pub xmss_index: u32,
+    pub transaction: Transaction,
+}
+
+pub async fn xmss_keypair_create(State(state): State<ApiState>) -> impl IntoResponse {
+    let mut wallet = state.wallet.write().await;
+    let index = wallet.create_and_store_xmss_keypair();
+    AxumJson(ApiResponse {
+        success: true,
+        data: Some(index),
+        error: None,
+        timestamp: now_timestamp(),
+        request_id: generate_request_id(),
+    })
+}
+
+pub async fn xmss_sign_transaction(State(state): State<ApiState>, AxumJson(req): AxumJson<XmssSignRequest>) -> impl IntoResponse {
+    let wallet = state.wallet.read().await;
+    match wallet.sign_transaction_xmss(req.xmss_index, &req.transaction) {
+        Ok(sig) => AxumJson(ApiResponse {
+            success: true,
+            data: Some(format!("{}", sig)),
+            error: None,
+            timestamp: now_timestamp(),
+            request_id: generate_request_id(),
+        }),
+        Err(e) => AxumJson(ApiResponse::<String> {
+            success: false,
+            data: None,
+            error: Some(format!("{}", e)),
+            timestamp: now_timestamp(),
+            request_id: generate_request_id(),
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct XmssAggregateSignRequest {
+    pub indices: Vec<u32>,
+    pub transaction: Transaction,
+}
+
+#[derive(Deserialize)]
+pub struct XmssAggregateVerifyRequest {
+    pub agg_sig: AggregatedSignature,
+    pub transaction: Transaction,
+    pub public_keys: Vec<Vec<u8>>,
+}
+
+pub async fn xmss_aggregate_sign(State(state): State<ApiState>, AxumJson(req): AxumJson<XmssAggregateSignRequest>) -> impl IntoResponse {
+    let wallet = state.wallet.read().await;
+    let agg_sig = wallet.aggregate_xmss_signatures(&req.indices, &req.transaction);
+    AxumJson(ApiResponse {
+        success: true,
+        data: Some(agg_sig),
+        error: None,
+        timestamp: now_timestamp(),
+        request_id: generate_request_id(),
+    })
+}
+
+pub async fn xmss_aggregate_verify(State(state): State<ApiState>, AxumJson(req): AxumJson<XmssAggregateVerifyRequest>) -> impl IntoResponse {
+    let wallet = state.wallet.read().await;
+    let result = wallet.verify_aggregated_signature(&req.agg_sig, &req.transaction, &req.public_keys);
+    AxumJson(ApiResponse {
+        success: true,
+        data: Some(result),
+        error: None,
+        timestamp: now_timestamp(),
+        request_id: generate_request_id(),
+    })
 }
 
 // Utility functions

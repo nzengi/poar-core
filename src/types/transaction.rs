@@ -28,7 +28,7 @@ pub struct Transaction {
     /// Transaction data/payload
     pub data: Vec<u8>,
     /// Sender's signature
-    pub signature: Signature,
+    pub signature: crate::types::Signature,
     /// Unix timestamp when transaction was created
     pub timestamp: u64,
     /// Transaction type
@@ -204,7 +204,7 @@ impl Transaction {
     }
 
     /// Sign transaction with private key
-    pub fn sign(&mut self, signature: Signature) {
+    pub fn sign(&mut self, signature: crate::types::Signature) {
         self.signature = signature;
     }
 
