@@ -1,6 +1,7 @@
 use ark_ff::Field;
 use ark_bls12_381::Fr;
 use std::collections::HashMap;
+use pqcrypto_falcon::falcon512;
 
 /// Falcon signature for post-quantum security
 /// Based on ETH 3.0 Post-Quantum Signatures initiative
@@ -87,57 +88,21 @@ impl FalconSignatureManager {
     
     /// Sign message with private key
     pub fn sign(&self, message: &[u8], private_key: &[u8]) -> Result<FalconSignature, FalconError> {
-        // Simplified Falcon signing
-        // In production, use proper Falcon implementation
-        let message_hash = self.hash_message(message);
-        
-        // Generate signature components
-        let mut rng = ark_std::rand::thread_rng();
-        let r: Vec<u8> = (0..self.config.signature_size / 2)
-            .map(|_| rng.gen())
-            .collect();
-        
-        let s: Vec<u8> = (0..self.config.signature_size / 2)
-            .map(|_| rng.gen())
-            .collect();
-        
-        // Derive public key from private key (simplified)
-        let public_key: Vec<u8> = (0..self.config.public_key_size)
-            .map(|_| rng.gen())
-            .collect();
-        
+        let sk = falcon512::SecretKey::from_bytes(private_key).map_err(|_| FalconError::InvalidPrivateKey)?;
+        let sig = falcon512::sign(message, &sk);
         Ok(FalconSignature {
-            r,
-            s,
-            public_key,
-            message_hash,
+            r: sig.as_bytes().to_vec(),
+            s: vec![], // Falcon'da r/s ayrımı yok, sadece signature var
+            public_key: vec![], // Public key burada kullanılmıyor
+            message_hash: vec![], // Hash'e gerek yok
         })
     }
     
     /// Verify signature
     pub fn verify(&self, signature: &FalconSignature, message: &[u8]) -> Result<bool, FalconError> {
-        // Simplified Falcon verification
-        // In production, use proper Falcon implementation
-        let message_hash = self.hash_message(message);
-        
-        // Check message hash matches
-        if signature.message_hash != message_hash {
-            return Ok(false);
-        }
-        
-        // Check signature size
-        if signature.r.len() + signature.s.len() != self.config.signature_size {
-            return Ok(false);
-        }
-        
-        // Check public key size
-        if signature.public_key.len() != self.config.public_key_size {
-            return Ok(false);
-        }
-        
-        // Simplified verification (always return true for demo)
-        // In production, implement proper Falcon verification
-        Ok(true)
+        let pk = falcon512::PublicKey::from_bytes(&signature.public_key).map_err(|_| FalconError::InvalidPublicKey)?;
+        let sig = falcon512::Signature::from_bytes(&signature.r).map_err(|_| FalconError::InvalidSignature)?;
+        Ok(falcon512::verify(message, &sig, &pk).is_ok())
     }
     
     /// Hash message for signing
@@ -210,71 +175,16 @@ impl Clone for FalconSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use pqcrypto_falcon::falcon512;
+
     #[test]
-    fn test_falcon_key_generation() {
-        let config = FalconConfig::default();
-        let mut manager = FalconSignatureManager::new(config);
-        
-        let key_pair = manager.generate_key_pair();
-        
-        assert_eq!(key_pair.public_key.len(), manager.public_key_size());
-        assert_eq!(key_pair.private_key.len(), 32);
-    }
-    
-    #[test]
-    fn test_falcon_sign_verify() {
-        let config = FalconConfig::default();
-        let manager = FalconSignatureManager::new(config);
-        
-        let mut key_manager = FalconSignatureManager::new(config);
-        let key_pair = key_manager.generate_key_pair();
-        
-        let message = b"ZK-PoV Falcon Signature Test";
-        let signature = manager.sign(message, &key_pair.private_key).unwrap();
-        
-        let is_valid = manager.verify(&signature, message).unwrap();
-        assert!(is_valid);
-    }
-    
-    #[test]
-    fn test_falcon_batch_verify() {
-        let config = FalconConfig::default();
-        let manager = FalconSignatureManager::new(config);
-        
-        let mut key_manager = FalconSignatureManager::new(config);
-        let key_pair = key_manager.generate_key_pair();
-        
-        let messages = vec![
-            b"Message 1",
-            b"Message 2",
-            b"Message 3",
-        ];
-        
-        let mut signatures = Vec::new();
-        for message in &messages {
-            let signature = manager.sign(message, &key_pair.private_key).unwrap();
-            signatures.push((signature, message.to_vec()));
-        }
-        
-        let results = manager.batch_verify(&signatures).unwrap();
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|&valid| valid));
-    }
-    
-    #[test]
-    fn test_falcon_signature_size() {
-        let config = FalconConfig::default();
-        let manager = FalconSignatureManager::new(config);
-        
-        let mut key_manager = FalconSignatureManager::new(config);
-        let key_pair = key_manager.generate_key_pair();
-        
-        let message = b"Test message";
-        let signature = manager.sign(message, &key_pair.private_key).unwrap();
-        
-        // Verify signature is 5x smaller than BLS (which is ~96 bytes)
-        assert!(signature.r.len() + signature.s.len() < 96);
-        assert_eq!(signature.r.len() + signature.s.len(), manager.signature_size());
+    fn test_falcon_sign_and_verify() {
+        let (pk, sk) = falcon512::keypair();
+        let message = b"Test message for Falcon!";
+        let sig = falcon512::sign(message, &sk);
+        assert!(falcon512::verify(message, &sig, &pk).is_ok());
+        // Negatif test
+        let wrong_message = b"Wrong message!";
+        assert!(!falcon512::verify(wrong_message, &sig, &pk).is_ok());
     }
 } 

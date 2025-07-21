@@ -159,6 +159,9 @@ ethereum-types = "0.14"          # Ethereum-compatible types
 # Secure storage backends
 directories = "5.0"               # Standard directory locations
 
+pqcrypto-falcon = "0.2.10"
+pqcrypto-xmss = "0.2.10"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.8"

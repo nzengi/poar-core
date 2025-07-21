@@ -231,8 +231,8 @@ impl BlockValidityCircuit {
     ) -> Result<(), SynthesisError> {
         match signature {
             crate::types::Signature::Ed25519(_bytes) => {
-                // Ed25519 signature verification constraints
-                // This would use arkworks Ed25519 gadget
+        // Ed25519 signature verification constraints
+        // This would use arkworks Ed25519 gadget
                 // Placeholder: Assume valid for now
                 Ok(())
             }
@@ -262,7 +262,7 @@ impl BlockValidityCircuit {
                     let path_var = MerklePathVar::<Fr, Sha256MerkleConfig>::new_witness(cs.clone(), || Ok(agg.merkle_proofs[i].clone()))?;
                     path_var.verify_membership(cs.clone(), &pk_var, &root_var)?;
                 }
-                Ok(())
+        Ok(())
             }
         }
     }
