@@ -1,6 +1,56 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+// =============================
+// POAR Token Economics Constants
+// =============================
+
+/// Initial supply minted at genesis
+pub const INITIAL_SUPPLY: u64 = 10_000_000;
+
+/// Maximum supply (hard cap)
+pub const MAX_SUPPLY: u64 = 1_000_000_000;
+
+/// Minimum supply (burn floor) – total supply cannot go below this
+pub const MIN_SUPPLY: u64 = 100_000_000;
+
+/// Initial epoch reward (decreases with decay)
+pub const BASE_REWARD: u64 = 50_000;
+
+/// Decay factor (each epoch reward is this fraction of the previous)
+pub const DECAY_FACTOR: f64 = 0.99997;
+
+/// Percentage of transaction fee that is burned (e.g., 0.20 = 20%)
+pub const BURN_RATIO: f64 = 0.20;
+
+/// Minimum stake required to become a validator
+pub const MIN_VALIDATOR_STAKE: u64 = 50_000;
+
+/// Early adopter bonus rate (first 2 years)
+pub const EARLY_ADOPTER_BONUS: f64 = 0.10;
+
+/// Early adopter bonus duration (in epochs, 2 years = 730 epochs)
+pub const EARLY_ADOPTER_BONUS_EPOCHS: u64 = 730;
+
+/// Stake multiplier for low stake ratio (<60%)
+pub const LOW_STAKE_BONUS: f64 = 0.10; // +10%
+
+/// Stake penalty for high stake ratio (>80%)
+pub const HIGH_STAKE_PENALTY: f64 = -0.10; // -10%
+
+/// Minimum transaction fee (in ZERO units, 0.01 POAR)
+pub const FEE_MINIMUM: u64 = 10_000_000; // 0.01 * 1_000_000_000
+
+/// Typical transfer fee range (in ZERO units, 0.01–0.05 POAR)
+pub const FEE_TRANSFER_MIN: u64 = 10_000_000; // 0.01 POAR
+pub const FEE_TRANSFER_MAX: u64 = 50_000_000; // 0.05 POAR
+
+/// Soft cap for validator stake (no validator should control more than 10% of total stake)
+pub const VALIDATOR_STAKE_CAP: f64 = 0.10;
+
+/// Unstake bonus (+2% if circulation drops too low)
+pub const UNSTAKE_BONUS: f64 = 0.02;
+
 /// ZK-PoV Token Units
 /// 
 /// Token hierarchy:

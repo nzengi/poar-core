@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::types::{Hash, Address, Transaction, ZKProof, Signature};
+use crate::types::signature::SignatureKind;
+// use crate::proto::poar as proto;
 
 /// POAR blockchain block with ZK-proof integration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -427,6 +429,70 @@ fn calculate_merkle_root_from_hashes(hashes: &[Hash]) -> Hash {
 
     current_level[0]
 }
+
+// impl From<proto::Block> for Block {
+//     fn from(pb: proto::Block) -> Self {
+//         Block {
+//             header: pb.header.map(|h| h.into()).unwrap(),
+//             transactions: pb.transactions.into_iter().map(|t| t.into()).collect(),
+//         }
+//     }
+// }
+
+// impl From<Block> for proto::Block {
+//     fn from(block: Block) -> Self {
+//         proto::Block {
+//             header: Some(block.header.into()),
+//             transactions: block.transactions.into_iter().map(|t| t.into()).collect(),
+//         }
+//     }
+// }
+
+// impl From<proto::BlockHeader> for BlockHeader {
+//     fn from(pb: proto::BlockHeader) -> Self {
+//         BlockHeader {
+//             hash: Hash::from_slice(&pb.hash).expect("Hash must be 32 bytes"),
+//             previous_hash: Hash::from_slice(&pb.previous_hash).expect("Hash must be 32 bytes"),
+//             merkle_root: Hash::from_slice(&pb.merkle_root).expect("Hash must be 32 bytes"),
+//             state_root: Hash::from_slice(&pb.state_root).expect("Hash must be 32 bytes"),
+//             height: pb.height,
+//             timestamp: pb.timestamp,
+//             validator: Address::from_slice(&pb.validator).expect("Address must be 20 bytes"),
+//             signature: Signature::from_bytes(SignatureKind::Ed25519, &pb.signature).expect("Signature decode"),
+//             zk_proof: {
+//                 let mut proof = ZKProof::from_bytes(&pb.zk_proof);
+//                 proof.timestamp = 0; // Set default if missing
+//                 proof
+//             },
+//             nonce: pb.nonce,
+//             gas_limit: pb.gas_limit,
+//             gas_used: pb.gas_used,
+//             difficulty: pb.difficulty,
+//             extra_data: pb.extra_data,
+//         }
+//     }
+// }
+
+// impl From<BlockHeader> for proto::BlockHeader {
+//     fn from(header: BlockHeader) -> Self {
+//         proto::BlockHeader {
+//             hash: header.hash.as_bytes().to_vec(),
+//             previous_hash: header.previous_hash.as_bytes().to_vec(),
+//             merkle_root: header.merkle_root.as_bytes().to_vec(),
+//             state_root: header.state_root.as_bytes().to_vec(),
+//             height: header.height,
+//             timestamp: header.timestamp,
+//             validator: header.validator.as_bytes().to_vec(),
+//             signature: header.signature.to_bytes(),
+//             zk_proof: header.zk_proof.to_bytes(),
+//             nonce: header.nonce,
+//             gas_limit: header.gas_limit,
+//             gas_used: header.gas_used,
+//             difficulty: header.difficulty,
+//             extra_data: header.extra_data,
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

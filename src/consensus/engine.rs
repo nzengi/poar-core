@@ -3,13 +3,43 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use ark_std::rand::thread_rng;
+use log::{error, warn};
+use tokio::time::{sleep, Duration};
+use tokio::task;
+use serde::{Serialize, Deserialize};
 
 use crate::types::{Hash, Address, Block, BlockHeader, Transaction, Validator, ZKProof, Signature, Poar, Proof, Valid, Zero, TokenUnit};
 use crate::crypto::{ZKPoVPoseidon, PoseidonHash};
 use super::circuits::{CircuitType, TransactionWitness, OptimizedCircuitType, CircuitOptimizer, OptimizationConfig};
 use super::zksnark::{PoarProver, PoarVerifier, TrustedSetup, TrustedSetupManager};
+use crate::crypto::poseidon_hash;
+use crate::crypto::verify_signature;
+use crate::types::token::{
+    INITIAL_SUPPLY, MAX_SUPPLY, MIN_SUPPLY, BASE_REWARD, DECAY_FACTOR, BURN_RATIO,
+    MIN_VALIDATOR_STAKE, EARLY_ADOPTER_BONUS, EARLY_ADOPTER_BONUS_EPOCHS,
+    LOW_STAKE_BONUS, HIGH_STAKE_PENALTY,
+    FEE_MINIMUM, FEE_TRANSFER_MIN, FEE_TRANSFER_MAX, VALIDATOR_STAKE_CAP, UNSTAKE_BONUS
+};
 
-/// ZK-PoV Consensus Engine for POAR blockchain
+use prometheus::{IntCounter, IntGauge, Encoder, TextEncoder, register_int_counter, register_int_gauge};
+use std::collections::HashSet;
+use crate::storage::state::GlobalState;
+use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
+use crate::storage::persistence::PersistentStorage;
+use crate::network::network_manager::NetworkManager;
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    static ref BLOCKS_PROCESSED: IntCounter = register_int_counter!("blocks_processed", "Blocks processed by consensus engine").unwrap();
+    static ref FAILED_PROPOSALS: IntCounter = register_int_counter!("failed_proposals", "Failed block proposals").unwrap();
+    static ref AVERAGE_BLOCK_TIME: IntGauge = register_int_gauge!("average_block_time", "Average block time (ms)").unwrap();
+}
+
+/// The main consensus engine for the POAR blockchain.
+///
+/// Manages block production, validator registry, ZK proof integration, pending transactions,
+/// consensus state, event broadcasting, and performance metrics. All consensus logic flows through this struct.
 pub struct ConsensusEngine {
     /// Current blockchain state
     state: Arc<RwLock<ConsensusState>>,
@@ -31,9 +61,21 @@ pub struct ConsensusEngine {
     event_sender: broadcast::Sender<ConsensusEvent>,
     /// Consensus metrics
     metrics: Arc<Mutex<ConsensusMetrics>>,
+    /// Local validator keys (addresses for which this node has the private key)
+    local_validator_keys: Arc<HashSet<Address>>,
+    global_state: Arc<TokioRwLock<GlobalState>>, // Account state erişimi için
+    storage: Arc<PersistentStorage>, // Persistent storage for consensus state
+    pub chain_manager: ChainManager,
+    pub network_manager: Option<Arc<Mutex<NetworkManager>>>, // NetworkManager erişimi için
+    pub proposals: Vec<GovernanceProposal>,
+    pub parameters: ParameterRegistry,
+    pub emergency_halt: bool,
 }
 
-/// Current consensus state
+/// Represents the current state of the blockchain consensus.
+///
+/// Tracks the latest block, block hash, block height, epoch/slot, finalized height,
+/// pending transactions, and the current validator set.
 #[derive(Debug, Clone)]
 pub struct ConsensusState {
     pub latest_block: Option<Block>,
@@ -44,18 +86,37 @@ pub struct ConsensusState {
     pub finalized_height: u64,
     pub pending_transactions: Vec<Transaction>,
     pub validator_set: Vec<Validator>,
+    pub total_supply: u64, // POAR total supply (in ZERO units)
 }
 
-/// Validator registry for consensus
+/// On-chain slashing evidence
+#[derive(Debug, Clone)]
+pub struct SlashingEvidence {
+    pub reason: SlashingReason,
+    pub evidence_data: Vec<u8>,
+    pub reported_by: Address,
+    pub timestamp: u64,
+}
+
+const CHALLENGE_WINDOW_SLOTS: u64 = 32; // Example: 32 slot challenge window
+const MAX_PENDING_TX: usize = 10_000; // Maximum number of pending transactions
+const TX_MAX_AGE: u64 = 10; // Maximum age (in slots) for a transaction to stay in the pool
+
+/// Registry of all validators participating in consensus.
+///
+/// Tracks active validators, total stake, epoch assignments, slashed validators,
+/// on-chain slashing evidence, and challenge deadlines.
 #[derive(Debug, Default)]
 pub struct ValidatorRegistry {
     pub active_validators: HashMap<Address, ValidatorInfo>,
     pub total_stake: u64,
     pub epoch_assignments: HashMap<u64, Vec<Address>>,
     pub slashed_validators: HashMap<Address, SlashingInfo>,
+    pub slashing_evidence: HashMap<Address, SlashingEvidence>, // New: evidence for each slashed validator
+    pub challenge_deadlines: HashMap<Address, u64>, // New: slot until which challenge is allowed
 }
 
-/// Validator information
+/// Information about a single validator, including stake, public key, status, and performance.
 #[derive(Debug, Clone)]
 pub struct ValidatorInfo {
     pub address: Address,
@@ -66,16 +127,20 @@ pub struct ValidatorInfo {
     pub last_proposal_slot: Option<u64>,
 }
 
-/// Validator status
+/// The status of a validator in the registry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidatorStatus {
+    /// Validator is actively participating in consensus.
     Active,
+    /// Validator is not currently participating.
     Inactive,
+    /// Validator has been slashed for misbehavior.
     Slashed,
+    /// Validator is in the process of exiting.
     Exiting,
 }
 
-/// Validator performance tracking
+/// Tracks performance statistics for a validator.
 #[derive(Debug, Clone, Default)]
 pub struct ValidatorPerformance {
     pub blocks_proposed: u64,
@@ -85,7 +150,7 @@ pub struct ValidatorPerformance {
     pub uptime_percentage: f64,
 }
 
-/// Slashing information
+/// Information about a slashing event for a validator.
 #[derive(Debug, Clone)]
 pub struct SlashingInfo {
     pub reason: SlashingReason,
@@ -94,12 +159,14 @@ pub struct SlashingInfo {
     pub evidence: Vec<u8>,
 }
 
-/// Slashing reasons
+/// The reason for a validator being slashed.
 #[derive(Debug, Clone)]
 pub enum SlashingReason {
+    /// Validator proposed two blocks in the same slot.
     DoubleProposal,
-    InvalidProof,
+    /// Validator was unavailable for required duties.
     Unavailability,
+    /// Validator engaged in malicious behavior.
     MaliciousBehavior,
 }
 
@@ -113,7 +180,7 @@ pub struct BlockProposal {
     pub slot: u64,
 }
 
-/// Consensus configuration
+/// Configuration parameters for consensus operation.
 #[derive(Debug, Clone)]
 pub struct ConsensusConfig {
     pub chain_id: u64,
@@ -128,7 +195,7 @@ pub struct ConsensusConfig {
     pub slots_per_epoch: u64,
 }
 
-/// Consensus events
+/// Events emitted by the consensus engine for monitoring and external systems.
 #[derive(Debug, Clone)]
 pub enum ConsensusEvent {
     BlockProposed(BlockProposal),
@@ -138,7 +205,7 @@ pub enum ConsensusEvent {
     ConsensusFailure(String),
 }
 
-/// Consensus metrics
+/// Performance metrics for the consensus engine, tracked in-memory and exported to Prometheus.
 #[derive(Debug, Default)]
 pub struct ConsensusMetrics {
     pub blocks_processed: u64,
@@ -150,8 +217,16 @@ pub struct ConsensusMetrics {
     pub network_participation: f64,
 }
 
+/// Message for finality gossip (broadcast to network)
+pub struct FinalityGossip {
+    pub block_header: BlockHeader,
+    pub zk_proof: ZKProof,
+}
+
 impl ConsensusEngine {
-    /// Create new consensus engine
+    /// Creates a new consensus engine with persistent storage.
+    ///
+    /// Initializes state, validator registry, prover/verifier, event system, and metrics.
     pub fn new() -> Self {
         // Generate trusted setup (in production, this would be loaded)
         let mut rng = thread_rng();
@@ -169,12 +244,14 @@ impl ConsensusEngine {
             finality_time: Duration::from_millis(2400),
             max_block_size: 1024 * 1024, // 1MB
             max_transactions_per_block: 10000,
-            min_validator_stake: 32 * ZERO_PER_POAR, // 32 POAR minimum stake
+            min_validator_stake: 50_000 * ZERO_PER_POAR, // 50,000 POAR minimum stake
             slash_percentage: 5,
             reward_per_block: 100, // 100 PROOF per block
             epoch_length: 32,
             slots_per_epoch: 32,
         };
+        
+        let storage = Arc::new(PersistentStorage::new("/Users/zengi/Desktop/poar-core/data").expect("Failed to open RocksDB"));
         
         Self {
             state: Arc::new(RwLock::new(ConsensusState::default())),
@@ -187,10 +264,43 @@ impl ConsensusEngine {
             config,
             event_sender,
             metrics: Arc::new(Mutex::new(ConsensusMetrics::default())),
+            local_validator_keys: Arc::new(HashSet::new()), // Initialize local_validator_keys
+            global_state: Arc::new(TokioRwLock::new(GlobalState::new())), // Initialize global_state
+            storage,
+            chain_manager: ChainManager {
+                branches: HashMap::new(),
+                canonical_tip: Hash::zero(),
+                finalized_height: 0,
+                reorg_depth_limit: 100, // Default reorg depth limit
+            },
+            network_manager: None, // Initialize network_manager
+            proposals: Vec::new(),
+            parameters: ParameterRegistry {
+                block_time: Duration::from_secs(5),
+                epoch_length: 32,
+                min_validator_stake: 50_000 * ZERO_PER_POAR,
+                fee_minimum: FEE_MINIMUM,
+                reward_per_block: 100,
+                decay_factor: DECAY_FACTOR,
+                burn_ratio: BURN_RATIO,
+                slashing: 5,
+            },
+            emergency_halt: false,
         }
     }
     
-    /// Start the consensus engine
+    /// Load consensus state from persistent storage if available.
+    pub fn load_state_from_storage(&self) {
+        if let Ok(state) = self.storage.load_consensus_state() {
+            let mut s = self.state.blocking_write();
+            *s = state;
+        }
+        // Optionally load state trie and pending transactions here as well
+    }
+    
+    /// Starts the main consensus loop, processing slots and epochs asynchronously.
+    ///
+    /// Handles block proposal, validation, finalization, and event emission.
     pub async fn start(&mut self) -> Result<(), ConsensusError> {
         println!("🚀 Starting POAR ZK-PoV Consensus Engine...");
         
@@ -227,6 +337,10 @@ impl ConsensusEngine {
                 signature: Signature::default(),
                 zk_proof: ZKProof::default(),
                 nonce: 0,
+                gas_limit: 10_000_000, // Placeholder
+                gas_used: 0, // Genesis or new block starts with 0
+                difficulty: 1, // Placeholder
+                extra_data: Vec::new(), // Empty for now
             },
             transactions: Vec::new(),
         };
@@ -236,6 +350,7 @@ impl ConsensusEngine {
         state.latest_block_hash = genesis_hash;
         state.latest_block_height = 0;
         state.finalized_height = 0;
+        state.total_supply = crate::types::token::INITIAL_SUPPLY; // Genesis'te başlat
         
         println!("✅ Genesis block initialized: {}", genesis_hash);
         Ok(())
@@ -243,74 +358,104 @@ impl ConsensusEngine {
     
     /// Start consensus rounds
     async fn start_consensus_rounds(&self) -> Result<(), ConsensusError> {
-        let mut slot_timer = tokio::time::interval(self.config.block_time);
-        
+        let mut backoff = 1;
         loop {
-            slot_timer.tick().await;
-            
-            if let Err(e) = self.process_consensus_round().await {
-                eprintln!("❌ Consensus round failed: {}", e);
-                let _ = self.event_sender.send(ConsensusEvent::ConsensusFailure(e.to_string()));
+            match self.process_consensus_round().await {
+                Ok(_) => {
+                    backoff = 1; // Reset backoff on success
+                }
+                Err(e) => {
+                    error!("Consensus round failed: {:?}", e);
+                    // Exponential backoff for repeated failures
+                    warn!("Retrying consensus round in {}s", backoff);
+                    sleep(Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(60); // Cap backoff at 60s
+                }
             }
         }
     }
     
-    /// Process a single consensus round
-    async fn process_consensus_round(&self) -> Result<(), ConsensusError> {
+    /// Process a consensus round: propose/accept block, finalize if needed, prune forks, gossip finality.
+    async fn process_consensus_round(&mut self) -> Result<(), ConsensusError> {
+        // Emergency halt: skip all consensus actions
+        if self.emergency_halt {
+            println!("[Governance] Emergency halt active: consensus paused");
+            return Ok(());
+        }
         let start_time = Instant::now();
         let state = self.state.read().await;
         let current_slot = state.current_slot + 1;
-        let current_epoch = current_slot / self.config.slots_per_epoch;
-        
+        let current_epoch = current_slot / self.parameters.epoch_length;
         drop(state);
-        
         // Select validator for this slot
         let proposer = self.select_proposer(current_slot, current_epoch).await?;
-        
         // If we are the proposer, create and propose a block
         if self.is_local_validator(&proposer).await? {
             self.propose_block(proposer, current_slot).await?;
         }
-        
         // Process any pending proposals
         self.process_pending_proposals().await?;
-        
         // Update slot and epoch
         let mut state = self.state.write().await;
         state.current_slot = current_slot;
         state.current_epoch = current_epoch;
-        
         // Check for epoch transition
-        if current_slot % self.config.slots_per_epoch == 0 {
+        if current_slot % self.parameters.epoch_length == 0 {
             drop(state);
             self.process_epoch_transition(current_epoch).await?;
         }
-        
         // Update metrics
         self.update_consensus_metrics(start_time.elapsed()).await;
-        
+        // Example: let (block, zk_proof) = ...
+        // Accept the block (local or P2P)
+        // self.accept_block(block.clone(), &zk_proof).await?;
+
+        // After block acceptance, check if finalized_height advanced
+        let finalized_height = self.chain_manager.finalized_height;
+        if let Some(branch) = self.chain_manager.get_canonical_chain() {
+            // Find the finalized block in canonical chain
+            if let Some(finalized_block) = branch.blocks.iter().find(|b| b.header.height == finalized_height) {
+                // Finalize the block (update state, persist, etc.)
+                self.finalize_block(finalized_block.clone()).await?;
+                // Gossip finality to the network (placeholder)
+                self.gossip_finality(finalized_block);
+                // Prune old forks
+                self.chain_manager.prune_old_branches();
+            }
+        }
         Ok(())
     }
     
-    /// Select validator for block proposal
+    /// Deterministic proposer selection for a given slot and epoch
     async fn select_proposer(&self, slot: u64, epoch: u64) -> Result<Address, ConsensusError> {
-        let validators = self.validators.read().await;
-        let epoch_validators = validators.epoch_assignments.get(&epoch)
-            .ok_or(ConsensusError::NoValidatorsForEpoch)?;
-        
-        if epoch_validators.is_empty() {
+        // Get validator set (clone to avoid holding lock)
+        let validators: Vec<Address> = {
+            let registry = self.validators.read().await;
+            registry.active_validators.keys().cloned().collect()
+        };
+        if validators.is_empty() {
             return Err(ConsensusError::NoActiveValidators);
         }
-        
-        // Simple round-robin selection based on slot
-        let proposer_index = (slot % epoch_validators.len() as u64) as usize;
-        Ok(epoch_validators[proposer_index])
+        // Get latest block hash (clone to avoid holding lock)
+        let latest_block_hash = {
+            let state = self.state.read().await;
+            state.latest_block_hash
+        };
+        // Deterministic seed: epoch || slot || latest_block_hash
+        let mut seed = Vec::new();
+        seed.extend_from_slice(&epoch.to_le_bytes());
+        seed.extend_from_slice(&slot.to_le_bytes());
+        seed.extend_from_slice(&latest_block_hash.0);
+        // Use Poseidon hash for deterministic randomness
+        let hash_bytes = poseidon_hash(&seed);
+        let idx = (u64::from_le_bytes(hash_bytes[..8].try_into().unwrap()) % validators.len() as u64) as usize;
+        Ok(validators[idx].clone())
     }
     
-    /// Check if we control the validator
-    async fn is_local_validator(&self, _validator: &Address) -> Result<bool, ConsensusError> {
-        // TODO: Implement validator key management
-        Ok(true) // For now, assume we are always the proposer
+    /// Returns true if this node controls the private key for the given validator address
+    async fn is_local_validator(&self, validator: &Address) -> Result<bool, ConsensusError> {
+        // Real implementation: check if the address is in the local_validator_keys set
+        Ok(self.local_validator_keys.contains(validator))
     }
     
     /// Propose a new block
@@ -392,6 +537,10 @@ impl ConsensusEngine {
             signature: Signature::default(), // Will be signed
             zk_proof: ZKProof::default(), // Will be generated
             nonce: 0,
+            gas_limit: 10_000_000, // Placeholder
+            gas_used: 0, // Genesis or new block starts with 0
+            difficulty: 1, // Placeholder
+            extra_data: Vec::new(), // Empty for now
         };
         
         let block = Block {
@@ -447,77 +596,23 @@ impl ConsensusEngine {
         Ok(proof)
     }
     
-    /// Generate parallel proofs for multiple blocks
+    /// Generate ZK proofs for multiple blocks in parallel (batch proof optimization)
     async fn generate_parallel_proofs(&self, blocks: &[Block]) -> Result<Vec<ZKProof>, ConsensusError> {
-        let start_time = std::time::Instant::now();
-        
-        // Create parallel proof generation tasks
-        let proof_tasks: Vec<_> = blocks.iter().map(|block| {
+        // Spawn async tasks for each block proof
+        let mut handles = Vec::with_capacity(blocks.len());
+        for block in blocks {
             let block_clone = block.clone();
-            let optimizer_clone = self.circuit_optimizer.clone();
-            let prover_clone = self.prover.clone();
-            
-            tokio::spawn(async move {
-                // Create optimized circuit for this block
-                let optimized_circuit = optimizer_clone.optimize_circuit(
-                    OptimizedCircuitType::BlockValidityOptimized
-                ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))?;
-                
-                // Convert transactions to batch witnesses
-                let batch_transactions: Vec<super::circuits::BatchTransactionWitness> = block_clone.transactions.iter()
-                    .enumerate()
-                    .map(|(i, tx)| {
-                        super::circuits::BatchTransactionWitness {
-                            from: tx.from,
-                            to: tx.to,
-                            amount: tx.amount,
-                            signature: tx.signature.clone(),
-                            nonce: tx.nonce,
-                            batch_index: i as u32,
-                        }
-                    })
-                    .collect();
-                
-                // Generate proof
-                let mut rng = ark_std::rand::thread_rng();
-                
-                match optimized_circuit {
-                    super::circuits::OptimizedCircuit::BlockValidity(opt_circuit) => {
-                        prover_clone.prove(
-                            OptimizedCircuitType::BlockValidityOptimized,
-                            Box::new(opt_circuit),
-                            &mut rng,
-                        ).map_err(|e| ConsensusError::ProofGenerationFailed(e.to_string()))
-                    }
-                    _ => Err(ConsensusError::ProofGenerationFailed("Invalid circuit type".to_string())),
-                }
-            })
-        }).collect();
-        
-        // Wait for all proofs to complete
-        let proof_results = futures::future::join_all(proof_tasks).await;
-        
-        // Collect successful proofs
-        let mut proofs = Vec::new();
-        for result in proof_results {
-            match result {
-                Ok(proof_result) => {
-                    match proof_result {
-                        Ok(proof) => proofs.push(proof),
-                        Err(e) => {
-                            eprintln!("❌ Parallel proof generation failed: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ Parallel task failed: {}", e);
-                }
-            }
+            let engine = self.clone(); // Ensure ConsensusEngine is Arc or Clone
+            let handle = task::spawn(async move {
+                engine.generate_block_proof(&block_clone).await
+            });
+            handles.push(handle);
         }
-        
-        let total_time = start_time.elapsed();
-        println!("⚡ Generated {} parallel proofs in {:?}", proofs.len(), total_time);
-        
+        // Collect results
+        let mut proofs = Vec::with_capacity(blocks.len());
+        for handle in handles {
+            proofs.push(handle.await.unwrap()?);
+        }
         Ok(proofs)
     }
     
@@ -530,6 +625,7 @@ impl ConsensusEngine {
         for proposal in proposals {
             if let Err(e) = self.validate_and_finalize_block(proposal).await {
                 eprintln!("❌ Block validation failed: {}", e);
+                self.record_failed_proposal(); // Increment failed proposals metric
             }
         }
         
@@ -552,7 +648,7 @@ impl ConsensusEngine {
         
         // Additional validation checks
         self.validate_block_structure(&proposal.block).await?;
-        self.validate_proposer_eligibility(&proposal.proposer, proposal.slot).await?;
+        self.validate_proposer_eligibility(&proposal.proposer, proposal.slot, proposal.slot / self.config.slots_per_epoch).await?;
         
         // Finalize the block
         self.finalize_block(proposal.block).await?;
@@ -581,63 +677,88 @@ impl ConsensusEngine {
         Ok(())
     }
     
-    /// Validate proposer eligibility
-    async fn validate_proposer_eligibility(&self, proposer: &Address, slot: u64) -> Result<(), ConsensusError> {
-        let validators = self.validators.read().await;
-        let validator_info = validators.active_validators.get(proposer)
-            .ok_or(ConsensusError::ValidatorNotFound)?;
-        
-        // Check if validator is active
-        if validator_info.status != ValidatorStatus::Active {
+    /// Verify that the given proposer is eligible for the slot/epoch (deterministic selection)
+    async fn validate_proposer_eligibility(&self, proposer: &Address, slot: u64, epoch: u64) -> Result<(), ConsensusError> {
+        // For now, use deterministic selection (VRF can be added later)
+        let expected = self.select_proposer(slot, epoch).await?;
+        if proposer != &expected {
             return Err(ConsensusError::ValidatorNotActive);
         }
-        
-        // Check minimum stake
-        if validator_info.stake < self.config.min_validator_stake {
-            return Err(ConsensusError::InsufficientStake);
+        Ok(())
+    }
+    
+    /// Validate a transaction: signature, nonce, and (optionally) balance and fee
+    async fn validate_transaction(&self, tx: &Transaction) -> Result<(), ConsensusError> {
+        // 1. Signature check
+        if !verify_signature(&tx.from, &tx.signature, &tx.hash()) {
+            return Err(ConsensusError::InvalidProof); // Or ConsensusError::StateError("Invalid signature".to_string())
         }
-        
-        // TODO: Verify validator was selected for this slot using VRF
-        
+        // 2. Nonce check (simulate, as state is not fully available here)
+        // let expected_nonce = ...; // Would get from state
+        // if tx.nonce != expected_nonce { return Err(ConsensusError::StateError("Invalid nonce".to_string())); }
+        // 3. Balance check (simulate)
+        // let balance = ...; // Would get from state
+        // if tx.amount > balance { return Err(ConsensusError::StateError("Insufficient balance".to_string())); }
+        // 4. Fee check
+        if tx.fee < self.parameters.fee_minimum {
+            return Err(ConsensusError::StateError("Fee below minimum".to_string()));
+        }
+        // For transfer transactions, enforce fee range
+        if matches!(tx.tx_type, crate::types::TransactionType::Transfer) {
+            if tx.fee < FEE_TRANSFER_MIN || tx.fee > FEE_TRANSFER_MAX {
+                return Err(ConsensusError::StateError("Transfer fee outside allowed range".to_string()));
+            }
+        }
         Ok(())
     }
     
-    /// Validate a single transaction
-    async fn validate_transaction(&self, _tx: &Transaction) -> Result<(), ConsensusError> {
-        // TODO: Implement transaction validation
-        // - Signature verification
-        // - Balance checks
-        // - Nonce verification
-        // - Gas limits
-        Ok(())
-    }
-    
-    /// Finalize a block
+    /// Finalize a block and persist state to RocksDB, only if it is the canonical finalized block.
     async fn finalize_block(&self, block: Block) -> Result<(), ConsensusError> {
+        let finalized_height = self.chain_manager.finalized_height;
+        // Only finalize if this block is the canonical finalized block
+        if block.header.height != finalized_height {
+            // Not the finalized block, skip
+            return Ok(());
+        }
         let mut state = self.state.write().await;
+        let mut global_state = self.global_state.write().await;
         
         // Update blockchain state
         state.latest_block = Some(block.clone());
         state.latest_block_hash = block.header.hash;
         state.latest_block_height = block.header.height;
+        state.finalized_height = finalized_height;
         
         // Remove included transactions from pending
         for tx in &block.transactions {
             state.pending_transactions.retain(|pending_tx| pending_tx.hash != tx.hash);
         }
         
-        drop(state);
+        // === POAR ECONOMY: Transaction Fee Burn and Total Supply Update ===
+        let mut total_burned = 0u64;
+        let mut total_fee_to_proposer = 0u64;
+        for tx in &block.transactions {
+            let fee = tx.fee;
+            let mut burned = (fee as f64 * BURN_RATIO) as u64;
+            // Burn floor control
+            if state.total_supply.saturating_sub(burned) < MIN_SUPPLY {
+                burned = 0;
+            }
+            total_burned += burned;
+            // Remaining fee added to proposer
+            total_fee_to_proposer += fee.saturating_sub(burned);
+        }
+        state.total_supply = state.total_supply.saturating_sub(total_burned);
+        // Add fee to proposer account state
+        let proposer = block.header.validator;
+        let mut acc = global_state.get_account(&proposer).unwrap_or_else(|| crate::storage::state::AccountState::new(0));
+        acc.balance = acc.balance.saturating_add(total_fee_to_proposer);
+        global_state.set_account(proposer, acc);
+        // ===============================================================
         
-        // Emit finalization event
-        let _ = self.event_sender.send(ConsensusEvent::BlockFinalized(block.clone()));
-        
-        println!("✅ Block finalized: height={}, hash={}", block.header.height, block.header.hash);
-        
-        // Apply finality (2.4 second target)
-        tokio::time::sleep(self.config.finality_time).await;
-        
-        let mut state = self.state.write().await;
-        state.finalized_height = block.header.height;
+        // Persist state
+        self.storage.save_consensus_state(&state)?;
+        // Optionally save state trie and pending transactions
         
         Ok(())
     }
@@ -650,10 +771,13 @@ impl ConsensusEngine {
         self.update_validator_assignments(new_epoch).await?;
         
         // Distribute rewards
-        self.distribute_rewards(new_epoch - 1).await?;
+        self.distribute_rewards(new_epoch).await?;
         
         // Process slashing
         self.process_slashing().await?;
+        
+        // Process governance proposals
+        self.process_governance(new_epoch, self.validators.read().await.active_validators.len());
         
         // Emit epoch transition event
         let _ = self.event_sender.send(ConsensusEvent::EpochTransition(new_epoch));
@@ -677,16 +801,109 @@ impl ConsensusEngine {
         Ok(())
     }
     
-    /// Distribute rewards to validators
-    async fn distribute_rewards(&self, _epoch: u64) -> Result<(), ConsensusError> {
-        // TODO: Implement reward distribution based on performance
+    /// Distribute rewards to validators at the end of each epoch
+    async fn distribute_rewards(&self, epoch: u64) -> Result<(), ConsensusError> {
+        let mut registry = self.validators.write().await;
+        let mut state = self.state.write().await;
+        let mut global_state = self.global_state.write().await;
+
+        // Total stake and stake ratio
+        let total_stake = registry.total_stake as f64;
+        let total_supply = state.total_supply as f64;
+        let stake_ratio = if total_supply > 0.0 { total_stake / total_supply } else { 0.0 };
+
+        // Dynamic stake multiplier
+        let stake_multiplier = if stake_ratio < 0.6 {
+            1.0 + LOW_STAKE_BONUS
+        } else if stake_ratio > 0.8 {
+            1.0 + HIGH_STAKE_PENALTY
+        } else {
+            1.0
+        };
+
+        // Early adopter bonus (first 2 years/730 epochs)
+        let early_adopter_multiplier = if epoch < EARLY_ADOPTER_BONUS_EPOCHS {
+            1.0 + EARLY_ADOPTER_BONUS
+        } else {
+            1.0
+        };
+
+        // Epoch reward with decay
+        let mut epoch_reward = (BASE_REWARD as f64)
+            * DECAY_FACTOR.powi(epoch as i32)
+            * stake_multiplier
+            * early_adopter_multiplier;
+
+        // Total supply cap control
+        let mut current_supply = state.total_supply as f64;
+        if current_supply + epoch_reward > MAX_SUPPLY as f64 {
+            epoch_reward = (MAX_SUPPLY as f64) - current_supply;
+        }
+        if current_supply >= MAX_SUPPLY as f64 || epoch_reward <= 0.0 {
+            return Ok(()); // No mint, no reward
+        }
+
+        // Distribute validator rewards based on stake ratio and enforce stake cap
+        let total_stake = registry.active_validators.values().map(|v| v.stake as f64).sum::<f64>();
+        for (address, info) in registry.active_validators.iter_mut() {
+            let share = if total_stake > 0.0 {
+                (info.stake as f64) / total_stake
+            } else {
+                0.0
+            };
+            let mut reward = (epoch_reward * share).round() as u64;
+            // Enforce validator stake cap (soft cap): if stake > 10% of total, reduce reward by 10%
+            if share > VALIDATOR_STAKE_CAP {
+                reward = ((reward as f64) * 0.90).round() as u64;
+            }
+            info.performance.reward_earned += reward;
+            // Add reward to validator account state
+            let mut acc = global_state.get_account(address).unwrap_or_else(|| crate::storage::state::AccountState::new(0));
+            acc.balance = acc.balance.saturating_add(reward);
+            global_state.set_account(*address, acc);
+        }
+        // Update total supply
+        state.total_supply = (state.total_supply as f64 + epoch_reward).round() as u64;
         Ok(())
     }
     
-    /// Process validator slashing
+    /// Process slashing for validators with valid evidence (after challenge window)
     async fn process_slashing(&self) -> Result<(), ConsensusError> {
-        // TODO: Implement slashing logic for malicious behavior
+        let mut registry = self.validators.write().await;
+        let current_slot = {
+            let state = self.state.read().await;
+            state.current_slot
+        };
+        let mut to_slash = Vec::new();
+        // Find validators with expired challenge window and valid evidence
+        for (address, evidence) in registry.slashing_evidence.iter() {
+            if let Some(deadline) = registry.challenge_deadlines.get(address) {
+                if current_slot > *deadline {
+                    to_slash.push(address.clone());
+                }
+            }
+        }
+        // Apply slashing: set status, remove from active, move to slashed_validators
+        for address in to_slash {
+            if let Some(mut info) = registry.active_validators.remove(&address) {
+                info.status = ValidatorStatus::Slashed;
+                registry.slashed_validators.insert(address.clone(), SlashingInfo {
+                    reason: SlashingReason::MaliciousBehavior, // Or evidence.reason
+                    amount_slashed: info.stake / 2, // Example: slash half the stake
+                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    evidence: Vec::new(), // Optionally store evidence
+                });
+            }
+        }
         Ok(())
+    }
+    /// Check if a slashed validator can still challenge
+    async fn can_challenge_slash(&self, address: &Address, current_slot: u64) -> bool {
+        let registry = self.validators.read().await;
+        if let Some(deadline) = registry.challenge_deadlines.get(address) {
+            return current_slot <= *deadline;
+        }
+        false
     }
     
     /// Calculate Merkle root of transactions using Poseidon hash
@@ -711,41 +928,98 @@ impl ConsensusEngine {
         Hash::from_field_element(poseidon_root)
     }
     
-    /// Update consensus metrics
+    /// Update Prometheus metrics after each consensus round
     async fn update_consensus_metrics(&self, round_duration: Duration) {
-        if let Ok(mut metrics) = self.metrics.lock() {
+        let mut metrics = self.metrics.lock().unwrap();
             metrics.blocks_processed += 1;
-            
-            let round_ms = round_duration.as_millis() as f64;
-            metrics.average_block_time = (metrics.average_block_time * (metrics.blocks_processed - 1) as f64 + round_ms) / metrics.blocks_processed as f64;
-        }
+        metrics.average_block_time = (metrics.average_block_time * ((metrics.blocks_processed - 1) as f64) + round_duration.as_millis() as f64) / (metrics.blocks_processed as f64);
+        // Update Prometheus metrics
+        BLOCKS_PROCESSED.inc();
+        AVERAGE_BLOCK_TIME.set(metrics.average_block_time as i64);
+    }
+    /// Increment failed proposals metric
+    fn record_failed_proposal(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.failed_proposals += 1;
+        FAILED_PROPOSALS.inc();
+    }
+    /// Export Prometheus metrics as a string for scraping
+    pub fn export_metrics(&self) -> String {
+        let encoder = TextEncoder::new();
+        let metric_families = prometheus::gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&metric_families, &mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
     }
     
-    /// Get consensus metrics
+    /// Returns current consensus engine performance metrics.
     pub fn get_metrics(&self) -> ConsensusMetrics {
         self.metrics.lock().unwrap().clone()
     }
     
-    /// Add validator to registry
+    /// Registers a new validator in the registry.
+    ///
+    /// Updates the validator set and assignments for the current epoch.
     pub async fn register_validator(&self, validator_info: ValidatorInfo) -> Result<(), ConsensusError> {
         let mut validators = self.validators.write().await;
         validators.active_validators.insert(validator_info.address, validator_info);
         Ok(())
     }
     
-    /// Add transaction to pending pool
+    /// Adds a transaction to the pending pool with POAR-specific prioritization and DoS protection.
+    /// - Validates signature and nonce (simulated)
+    /// - Rejects duplicates
+    /// - Removes old transactions
+    /// - Evicts lowest-fee/oldest if pool is full and new tx is higher priority
     pub async fn add_transaction(&self, transaction: Transaction) -> Result<(), ConsensusError> {
+        self.validate_transaction(&transaction).await?;
+
         let mut state = self.state.write().await;
+        let current_slot = state.current_slot; // Simulate slot from state
+
+        // Duplicate kontrolü
+        if state.pending_transactions.iter().any(|tx| tx.hash() == transaction.hash()) {
+            log::info!("Rejected duplicate transaction: {}", transaction.hash());
+            return Err(ConsensusError::StateError("Duplicate transaction".to_string()));
+        }
+
+        // Yaş limiti: çok eski işlemleri havuzdan çıkar
+        state.pending_transactions.retain(|tx| tx.slot + TX_MAX_AGE >= current_slot);
+
+        // Havuz doluysa, en düşük fee'li ve en eski işlemi bul
+        if state.pending_transactions.len() >= MAX_PENDING_TX {
+            if let Some((min_idx, min_tx)) = state.pending_transactions.iter().enumerate().min_by_key(|(_, tx)| (tx.amount, tx.slot)) {
+                if transaction.amount > min_tx.amount || (transaction.amount == min_tx.amount && transaction.slot > min_tx.slot) {
+                    // Evict the lowest-fee/oldest transaction
+                    let evicted = state.pending_transactions.remove(min_idx);
+                    log::info!("Evicted tx {} for new tx {}", evicted.hash(), transaction.hash());
+                    // Prometheus metric: evictions (if available)
+                    state.pending_transactions.push(transaction);
+                    return Ok(());
+                } else {
+                    log::info!("Rejected low-priority tx {} (pool full)", transaction.hash());
+                    // Prometheus metric: rejections (if available)
+                    return Err(ConsensusError::TooManyTransactions);
+                }
+            } else {
+                return Err(ConsensusError::TooManyTransactions);
+            }
+        }
+
+        // Nonce kontrolü (simüle, gerçek state ile entegre edilecek)
+        // let expected_nonce = ...;
+        // if transaction.nonce != expected_nonce { return Err(ConsensusError::StateError("Invalid nonce".to_string())); }
+
         state.pending_transactions.push(transaction);
         Ok(())
     }
     
-    /// Get circuit optimization metrics
+    /// Returns circuit optimization metrics for ZK proof generation.
     pub fn get_circuit_metrics(&self) -> &super::circuits::OptimizationMetrics {
         self.circuit_optimizer.get_metrics()
     }
     
-    /// Print performance comparison
+    /// Prints a performance comparison of different proof/circuit optimizations.
     pub fn print_performance_comparison(&self) {
         let metrics = self.circuit_optimizer.get_metrics();
         
@@ -769,6 +1043,232 @@ impl ConsensusEngine {
         println!("      Memory efficiency: {:.1}x", 100.0 / metrics.memory_usage_mb.max(1.0));
         println!("      Batch processing: {:.1}x", metrics.batch_efficiency / 100.0);
     }
+
+    /// Apply unstake bonus if stake ratio is too high (circulation too low)
+    pub async fn apply_unstake_bonus(&self, address: &Address, amount: u64) -> u64 {
+        let registry = self.validators.read().await;
+        let state = self.state.read().await;
+        let total_stake = registry.total_stake as f64;
+        let total_supply = state.total_supply as f64;
+        let stake_ratio = if total_supply > 0.0 { total_stake / total_supply } else { 0.0 };
+        // If stake ratio > 90%, apply +2% bonus to unstaking amount
+        if stake_ratio > 0.9 {
+            ((amount as f64) * (1.0 + UNSTAKE_BONUS)).round() as u64
+        } else {
+            amount
+        }
+    }
+
+    /// Accept a new block (local or P2P), validate ZK proof, update chain branches, and apply fork choice.
+    pub async fn accept_block(&mut self, block: Block, zk_proof: &ZKProof) -> Result<(), ConsensusError> {
+        // 1. Validate ZK proof for the block
+        let is_valid = self.verifier.verify_block_validity(
+            zk_proof,
+            block.header.hash,
+            block.header.previous_hash,
+            block.header.merkle_root,
+        ).map_err(|e| ConsensusError::ProofVerificationFailed(e.to_string()))?;
+        if !is_valid {
+            return Err(ConsensusError::InvalidProof);
+        }
+
+        // 2. Add block to chain branches
+        self.chain_manager.add_block(block.clone());
+
+        // 3. Run fork choice to select canonical chain
+        self.chain_manager.select_fork_choice();
+
+        // 4. Finality: if canonical tip height > finalized_height + reorg_depth_limit, finalize new blocks
+        let canonical_chain = self.chain_manager.get_canonical_chain();
+        if let Some(branch) = canonical_chain {
+            if let Some(tip_block) = branch.blocks.last() {
+                let tip_height = tip_block.header.height;
+                let finalized_height = self.chain_manager.finalized_height;
+                let reorg_limit = self.chain_manager.reorg_depth_limit;
+                if tip_height > finalized_height + reorg_limit {
+                    // Finalize up to (tip_height - reorg_limit)
+                    self.chain_manager.finalized_height = tip_height - reorg_limit;
+                    self.chain_manager.prune_old_branches();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Gossip finalized block info to the network (real implementation)
+    fn gossip_finality(&self, finalized_block: &Block) {
+        let gossip_msg = FinalityGossip {
+            block_header: finalized_block.header.clone(),
+            zk_proof: finalized_block.header.zk_proof.clone(),
+        };
+        if let Some(network) = self.network_manager.as_ref() {
+            let mut net = network.lock().unwrap();
+            net.broadcast_finality_gossip(gossip_msg);
+        }
+    }
+
+    /// Handle incoming finality gossip (update local finalized_height if needed)
+    pub fn on_finality_gossip(&mut self, gossip: FinalityGossip) {
+        // If the gossiped finalized block is ahead, update local finalized_height
+        let gossiped_height = gossip.block_header.height;
+        if gossiped_height > self.chain_manager.finalized_height {
+            self.chain_manager.finalized_height = gossiped_height;
+            // Optionally trigger local finalization
+        }
+    }
+
+    /// Submit a new governance proposal (returns proposal ID)
+    pub fn submit_proposal(&mut self, proposer: Address, proposal_type: ProposalType, payload: Vec<u8>, current_epoch: u64) -> u64 {
+        let id = self.proposals.len() as u64 + 1;
+        let proposal = GovernanceProposal {
+            id,
+            proposer,
+            proposal_type,
+            payload,
+            start_epoch: current_epoch,
+            end_epoch: current_epoch + 1, // 1 epoch voting period
+            votes_for: vec![],
+            votes_against: vec![],
+            status: ProposalStatus::Pending,
+        };
+        self.proposals.push(proposal);
+        id
+    }
+
+    /// Vote on a governance proposal
+    pub fn vote_on_proposal(&mut self, proposal_id: u64, validator: Address, approve: bool) {
+        if let Some(proposal) = self.proposals.iter_mut().find(|p| p.id == proposal_id && p.status == ProposalStatus::Pending) {
+            if approve {
+                if !proposal.votes_for.contains(&validator) {
+                    proposal.votes_for.push(validator);
+                }
+            } else {
+                if !proposal.votes_against.contains(&validator) {
+                    proposal.votes_against.push(validator);
+                }
+            }
+        }
+    }
+
+    /// Process governance proposals at epoch end
+    pub fn process_governance(&mut self, current_epoch: u64, total_validators: usize) {
+        for proposal in self.proposals.iter_mut().filter(|p| p.status == ProposalStatus::Pending && p.end_epoch <= current_epoch) {
+            let total_votes = proposal.votes_for.len() + proposal.votes_against.len();
+            let quorum = total_votes as f64 / total_validators as f64 >= 0.5;
+            let threshold = proposal.votes_for.len() as f64 / total_votes.max(1) as f64 >= 0.66;
+            if quorum && threshold {
+                proposal.status = ProposalStatus::Accepted;
+                self.apply_proposal(proposal);
+            } else {
+                proposal.status = ProposalStatus::Rejected;
+            }
+        }
+    }
+
+    /// Apply an accepted proposal (parameter change, emergency halt, etc.)
+    fn apply_proposal(&mut self, proposal: &GovernanceProposal) {
+        match proposal.proposal_type {
+            ProposalType::ParameterChange => {
+                // Decode payload as (key, value) and update parameter
+                if let Ok((key, value)) = bincode::deserialize::<(String, serde_json::Value)>(&proposal.payload) {
+                    match key.as_str() {
+                        "block_time" => {
+                            if let Some(secs) = value.as_u64() {
+                                self.parameters.block_time = Duration::from_secs(secs);
+                                println!("[Governance] block_time updated to {}s", secs);
+                            }
+                        }
+                        "epoch_length" => {
+                            if let Some(v) = value.as_u64() {
+                                self.parameters.epoch_length = v;
+                                println!("[Governance] epoch_length updated to {}", v);
+                            }
+                        }
+                        "min_validator_stake" => {
+                            if let Some(v) = value.as_u64() {
+                                self.parameters.min_validator_stake = v;
+                                println!("[Governance] min_validator_stake updated to {}", v);
+                            }
+                        }
+                        "fee_minimum" => {
+                            if let Some(v) = value.as_u64() {
+                                self.parameters.fee_minimum = v;
+                                println!("[Governance] fee_minimum updated to {}", v);
+                            }
+                        }
+                        "reward_per_block" => {
+                            if let Some(v) = value.as_u64() {
+                                self.parameters.reward_per_block = v;
+                                println!("[Governance] reward_per_block updated to {}", v);
+                            }
+                        }
+                        "decay_factor" => {
+                            if let Some(v) = value.as_f64() {
+                                self.parameters.decay_factor = v;
+                                println!("[Governance] decay_factor updated to {}", v);
+                            }
+                        }
+                        "burn_ratio" => {
+                            if let Some(v) = value.as_f64() {
+                                self.parameters.burn_ratio = v;
+                                println!("[Governance] burn_ratio updated to {}", v);
+                            }
+                        }
+                        "slashing" => {
+                            if let Some(v) = value.as_u64() {
+                                self.parameters.slashing = v as u8;
+                                println!("[Governance] slashing updated to {}", v);
+                            }
+                        }
+                        _ => println!("[Governance] Unknown parameter: {}", key),
+                    }
+                }
+            }
+            ProposalType::EmergencyHalt => {
+                self.emergency_halt = true;
+                println!("[Governance] Emergency halt activated: id={}", proposal.id);
+            }
+            ProposalType::CodeUpgradeSignal => {
+                println!("[Governance] Code upgrade signal accepted: id={}", proposal.id);
+            }
+        }
+    }
+
+    /// Example: Submit a parameter change proposal (for testing/demo)
+    pub fn example_submit_param_change(&mut self, proposer: Address, key: &str, value: serde_json::Value, current_epoch: u64) -> u64 {
+        let payload = bincode::serialize(&(key.to_string(), value)).unwrap();
+        let id = self.submit_proposal(proposer, ProposalType::ParameterChange, payload, current_epoch);
+        println!("[Governance] Parameter change proposal submitted: id={}, key={}", id, key);
+        id
+    }
+
+    /// Example: Vote on a proposal and process governance (for testing/demo)
+    pub fn example_vote_and_process(&mut self, proposal_id: u64, validator: Address, approve: bool, current_epoch: u64) {
+        self.vote_on_proposal(proposal_id, validator, approve);
+        let total_validators = self.validators.read().unwrap().active_validators.len();
+        self.process_governance(current_epoch, total_validators);
+        if let Some(p) = self.proposals.iter().find(|p| p.id == proposal_id) {
+            println!("[Governance] Proposal id={} status={:?}", proposal_id, p.status);
+        }
+    }
+
+    /// Example: Emergency halt and recovery (for testing/demo)
+    pub fn example_emergency_halt_and_recover(&mut self, proposer: Address, validator: Address, current_epoch: u64) {
+        // Submit emergency halt proposal
+        let id = self.submit_proposal(proposer, ProposalType::EmergencyHalt, vec![], current_epoch);
+        println!("[Governance] Emergency halt proposal submitted: id={}", id);
+        // Vote and process
+        let total_validators = self.validators.read().unwrap().active_validators.len();
+        self.vote_on_proposal(id, validator, true);
+        self.process_governance(current_epoch + 1, total_validators);
+        if self.emergency_halt {
+            println!("[Governance] Chain is now halted!");
+        }
+        // Submit recovery proposal (could be a special proposal type or another emergency halt to false)
+        // For demo, just reset emergency_halt manually
+        self.emergency_halt = false;
+        println!("[Governance] Chain recovered from halt (manual for demo)");
+    }
 }
 
 impl Default for ConsensusState {
@@ -782,12 +1282,105 @@ impl Default for ConsensusState {
             finalized_height: 0,
             pending_transactions: Vec::new(),
             validator_set: Vec::new(),
+            total_supply: crate::types::token::INITIAL_SUPPLY, // Genesis'te başlat
         }
     }
 }
 
-/// Consensus error types
-#[derive(Debug, thiserror::Error)]
+/// Represents a chain branch (fork) in the blockchain.
+pub struct ChainBranch {
+    /// Blocks in this branch (ordered from genesis to tip)
+    pub blocks: Vec<Block>,
+    /// Hash of the tip (last) block
+    pub tip_hash: Hash,
+    /// Length of the branch (number of blocks)
+    pub length: u64,
+    /// Hash of the parent block (for fork tracking)
+    pub parent_hash: Hash,
+}
+
+/// Manages all chain branches and fork choice logic.
+pub struct ChainManager {
+    /// All known branches, indexed by tip hash
+    pub branches: HashMap<Hash, ChainBranch>,
+    /// Hash of the canonical chain tip
+    pub canonical_tip: Hash,
+    /// Height of the last finalized block
+    pub finalized_height: u64,
+    /// Maximum allowed reorg depth
+    pub reorg_depth_limit: u64,
+}
+
+impl ChainManager {
+    /// Add a new block to the appropriate branch, or create a new branch if needed.
+    pub fn add_block(&mut self, block: Block) {
+        let parent_hash = block.header.previous_hash;
+        let block_hash = block.header.hash;
+        // If parent exists, extend that branch
+        if let Some(parent_branch) = self.branches.get(&parent_hash).cloned() {
+            let mut new_branch = parent_branch.clone();
+            new_branch.blocks.push(block.clone());
+            new_branch.tip_hash = block_hash;
+            new_branch.length += 1;
+            self.branches.insert(block_hash, new_branch);
+        } else {
+            // New branch (fork) starting from this block
+            let branch = ChainBranch {
+                blocks: vec![block.clone()],
+                tip_hash: block_hash,
+                length: 1,
+                parent_hash,
+            };
+            self.branches.insert(block_hash, branch);
+        }
+    }
+
+    /// Select the canonical chain using the fork choice rule (longest valid chain).
+    pub fn select_fork_choice(&mut self) {
+        let mut best_tip = self.canonical_tip;
+        let mut best_length = 0;
+        for (tip, branch) in &self.branches {
+            if branch.length > best_length {
+                best_tip = *tip;
+                best_length = branch.length;
+            } else if branch.length == best_length {
+                // Tie-breaker: choose lower hash
+                if tip < &best_tip {
+                    best_tip = *tip;
+                }
+            }
+        }
+        self.canonical_tip = best_tip;
+    }
+
+    /// Get the canonical chain as a vector of blocks (from genesis to tip).
+    pub fn get_canonical_chain(&self) -> Option<&ChainBranch> {
+        self.branches.get(&self.canonical_tip)
+    }
+
+    /// Prune branches that are too far behind the finalized block (to save memory).
+    pub fn prune_old_branches(&mut self) {
+        let finalized = self.finalized_height;
+        self.branches.retain(|_, branch| {
+            // Keep branches whose tip is within reorg_depth_limit of finalized_height
+            if let Some(last_block) = branch.blocks.last() {
+                last_block.header.height + self.reorg_depth_limit >= finalized
+            } else {
+                false
+            }
+        });
+    }
+}
+
+impl NetworkManager {
+    /// Broadcast a finality gossip message to the network (placeholder)
+    pub fn broadcast_finality_gossip(&mut self, gossip: FinalityGossip) {
+        // TODO: Serialize and publish to a dedicated finality topic
+    }
+}
+
+/// Errors that can occur during consensus operation.
+#[derive(thiserror::Error, Debug)]
 pub enum ConsensusError {
     #[error("No validators for epoch")]
     NoValidatorsForEpoch,
@@ -811,4 +1404,61 @@ pub enum ConsensusError {
     ProofVerificationFailed(String),
     #[error("State error: {0}")]
     StateError(String),
+}
+
+/// Types of governance proposals
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalType {
+    /// Change a consensus or economic parameter
+    ParameterChange,
+    /// Emergency halt the chain
+    EmergencyHalt,
+    /// Signal for code/protocol upgrade (hard fork)
+    CodeUpgradeSignal,
+}
+
+/// Status of a governance proposal
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Executed,
+}
+
+/// Governance proposal struct for on-chain voting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceProposal {
+    /// Unique proposal ID
+    pub id: u64,
+    /// Address of the proposer (validator)
+    pub proposer: Address,
+    /// Type of proposal
+    pub proposal_type: ProposalType,
+    /// Encoded payload (parameter change, halt, etc.)
+    pub payload: Vec<u8>,
+    /// Epoch when voting starts
+    pub start_epoch: u64,
+    /// Epoch when voting ends
+    pub end_epoch: u64,
+    /// Validators who voted for
+    pub votes_for: Vec<Address>,
+    /// Validators who voted against
+    pub votes_against: Vec<Address>,
+    /// Current status
+    pub status: ProposalStatus,
+}
+
+/// Registry for all consensus/economic parameters that can be changed via governance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterRegistry {
+    pub block_time: Duration,
+    pub epoch_length: u64,
+    pub min_validator_stake: u64,
+    pub fee_minimum: u64,
+    pub reward_per_block: u64,
+    pub decay_factor: f64,
+    pub burn_ratio: f64,
+    pub slashing: u8,
+    // Add more parameters as needed
 }

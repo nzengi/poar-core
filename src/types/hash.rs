@@ -8,19 +8,23 @@ use std::fmt;
 pub struct Hash([u8; 32]);
 
 impl Hash {
-    /// Create a new hash from 32 bytes
-    pub fn new(bytes: [u8; 32]) -> Self {
-        Hash(bytes)
-    }
-
-    /// Create hash from slice (must be 32 bytes)
+    /// Create a Hash from a byte slice (must be 32 bytes)
     pub fn from_slice(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() != 32 {
             return Err("Hash must be 32 bytes");
         }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(bytes);
-        Ok(Hash(hash))
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        Ok(Hash(arr))
+    }
+    /// Get the hash as a byte array reference
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Create a new hash from 32 bytes
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Hash(bytes)
     }
 
     /// Hash arbitrary data using BLAKE3
@@ -37,11 +41,6 @@ impl Hash {
         }
         let hash = hasher.finalize();
         Hash(*hash.as_bytes())
-    }
-
-    /// Get the underlying bytes
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
     }
 
     /// Convert to hex string

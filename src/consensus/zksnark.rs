@@ -6,6 +6,10 @@ use ark_std::rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, BufReader, Write, Read};
+use std::path::Path;
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize, Compress, Validate};
 
 use crate::types::{ZKProof, Hash};
 use super::circuits::{CircuitType, CircuitManager};
@@ -483,6 +487,89 @@ impl PoarVerifier {
     }
 }
 
+// Block validity proof generation
+pub fn prove_block_validity<R: Rng>(
+    prover: &PoarProver,
+    block_hash: Hash,
+    previous_hash: Hash,
+    merkle_root: Hash,
+    timestamp: u64,
+    transactions: Vec<super::circuits::TransactionWitness>,
+    validator_signature: crate::types::Signature,
+    validator_pubkey: Vec<u8>,
+    nonce: u64,
+    rng: &mut R,
+) -> Result<ZKProof, ZKError> {
+    let circuit = super::circuits::BlockValidityCircuit::new(
+        block_hash,
+        previous_hash,
+        merkle_root,
+        timestamp,
+        transactions,
+        validator_signature,
+        validator_pubkey,
+        nonce,
+    );
+    prover.prove(CircuitType::BlockValidity, Box::new(circuit), rng)
+}
+
+// Transaction validity proof generation
+pub fn prove_transaction_validity<R: Rng>(
+    prover: &PoarProver,
+    tx_hash: Hash,
+    from_address: crate::types::Address,
+    to_address: crate::types::Address,
+    amount: u64,
+    signature: crate::types::Signature,
+    nonce: u64,
+    balance: u64,
+    rng: &mut R,
+) -> Result<ZKProof, ZKError> {
+    let mut circuit = super::circuits::TransactionValidityCircuit::default();
+    circuit.tx_hash = Some(tx_hash);
+    circuit.from_address = Some(from_address);
+    circuit.to_address = Some(to_address);
+    circuit.amount = Some(amount);
+    circuit.signature = Some(signature);
+    circuit.nonce = Some(nonce);
+    circuit.balance = Some(balance);
+    prover.prove(CircuitType::TransactionValidity, Box::new(circuit), rng)
+}
+
+// Block validity proof verification
+pub fn verify_block_validity(
+    verifier: &PoarVerifier,
+    proof: &ZKProof,
+    block_hash: Hash,
+    previous_hash: Hash,
+    merkle_root: Hash,
+) -> Result<bool, ZKError> {
+    let public_inputs = vec![
+        Fr::from_le_bytes_mod_order(block_hash.as_bytes()),
+        Fr::from_le_bytes_mod_order(previous_hash.as_bytes()),
+        Fr::from_le_bytes_mod_order(merkle_root.as_bytes()),
+    ];
+    verifier.verify(CircuitType::BlockValidity, proof, &public_inputs)
+}
+
+// Transaction validity proof verification
+pub fn verify_transaction_validity(
+    verifier: &PoarVerifier,
+    proof: &ZKProof,
+    tx_hash: Hash,
+    from_address: crate::types::Address,
+    to_address: crate::types::Address,
+    amount: u64,
+) -> Result<bool, ZKError> {
+    let public_inputs = vec![
+        Fr::from_le_bytes_mod_order(tx_hash.as_bytes()),
+        Fr::from_le_bytes_mod_order(from_address.as_bytes()),
+        Fr::from_le_bytes_mod_order(to_address.as_bytes()),
+        Fr::from(amount),
+    ];
+    verifier.verify(CircuitType::TransactionValidity, proof, &public_inputs)
+}
+
 /// Trusted setup ceremony manager
 pub struct TrustedSetupManager;
 
@@ -519,16 +606,46 @@ impl TrustedSetupManager {
         })
     }
     
-    /// Load trusted setup from files
-    pub fn load_setup(setup_dir: &str) -> Result<TrustedSetup, ZKError> {
-        // TODO: Implement loading from files
-        Err(ZKError::SetupError("Loading from files not implemented".to_string()))
+    /// Save Groth16 parameters (proving and verifying keys) to disk for a given circuit_id
+    pub fn save_setup(
+        circuit_id: CircuitType,
+        pk: &ProvingKey<Bls12_381>,
+        vk: &VerifyingKey<Bls12_381>,
+        dir: &str,
+    ) -> Result<(), String> {
+        let pk_path = format!("{}/{}_proving_key.bin", dir, circuit_id as u32);
+        let vk_path = format!("{}/{}_verifying_key.bin", dir, circuit_id as u32);
+        // Save ProvingKey
+        let pk_file = File::create(&pk_path).map_err(|e| format!("Create PK file: {e}"))?;
+        let mut pk_writer = BufWriter::new(pk_file);
+        pk.serialize_with_mode(&mut pk_writer, Compress::Yes).map_err(|e| format!("Serialize PK: {e}"))?;
+        pk_writer.flush().map_err(|e| format!("Flush PK: {e}"))?;
+        // Save VerifyingKey
+        let vk_file = File::create(&vk_path).map_err(|e| format!("Create VK file: {e}"))?;
+        let mut vk_writer = BufWriter::new(vk_file);
+        vk.serialize_with_mode(&mut vk_writer, Compress::Yes).map_err(|e| format!("Serialize VK: {e}"))?;
+        vk_writer.flush().map_err(|e| format!("Flush VK: {e}"))?;
+        Ok(())
     }
-    
-    /// Save trusted setup to files
-    pub fn save_setup(setup: &TrustedSetup, setup_dir: &str) -> Result<(), ZKError> {
-        // TODO: Implement saving to files
-        Err(ZKError::SetupError("Saving to files not implemented".to_string()))
+
+    /// Load Groth16 parameters (proving and verifying keys) from disk for a given circuit_id
+    pub fn load_setup(
+        circuit_id: CircuitType,
+        dir: &str,
+    ) -> Result<(ProvingKey<Bls12_381>, VerifyingKey<Bls12_381>), String> {
+        let pk_path = format!("{}/{}_proving_key.bin", dir, circuit_id as u32);
+        let vk_path = format!("{}/{}_verifying_key.bin", dir, circuit_id as u32);
+        // Load ProvingKey
+        let pk_file = File::open(&pk_path).map_err(|e| format!("Open PK file: {e}"))?;
+        let mut pk_reader = BufReader::new(pk_file);
+        let pk = ProvingKey::<Bls12_381>::deserialize_with_mode(&mut pk_reader, Compress::Yes, Validate::No)
+            .map_err(|e| format!("Deserialize PK: {e}"))?;
+        // Load VerifyingKey
+        let vk_file = File::open(&vk_path).map_err(|e| format!("Open VK file: {e}"))?;
+        let mut vk_reader = BufReader::new(vk_file);
+        let vk = VerifyingKey::<Bls12_381>::deserialize_with_mode(&mut vk_reader, Compress::Yes, Validate::No)
+            .map_err(|e| format!("Deserialize VK: {e}"))?;
+        Ok((pk, vk))
     }
 }
 

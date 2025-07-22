@@ -355,6 +355,17 @@ impl GlobalState {
     pub fn get_account_count(&self) -> usize {
         self.accounts.read().unwrap().len()
     }
+
+    /// Export the current state as a StateTrie for persistence.
+    /// This minimal implementation creates a new trie and inserts all accounts as leaves.
+    pub fn get_trie(&self) -> StateTrie {
+        let mut trie = StateTrie::new();
+        let accounts = self.accounts.read().unwrap();
+        for (address, account) in accounts.iter() {
+            trie.insert(*address, account.clone());
+        }
+        trie
+    }
 }
 
 impl StateManager {

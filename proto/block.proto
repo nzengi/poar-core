@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package poar;
+
+message BlockHeader {
+  bytes hash = 1;
+  bytes previous_hash = 2;
+  bytes merkle_root = 3;
+  bytes state_root = 4;
+  uint64 height = 5;
+  uint64 timestamp = 6;
+  bytes validator = 7;
+  bytes signature = 8;
+  bytes zk_proof = 9;
+  uint64 nonce = 10;
+  uint64 gas_limit = 11;
+  uint64 gas_used = 12;
+  uint64 difficulty = 13;
+  bytes extra_data = 14;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated Transaction transactions = 2;
+}
+
+// Transaction is imported from transaction.proto
+import "transaction.proto"; 

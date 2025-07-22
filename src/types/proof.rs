@@ -53,7 +53,7 @@ pub struct ZKProof {
     /// Circuit identifier
     pub circuit_id: CircuitId,
     /// Proof generation timestamp
-    pub timestamp: u64,
+    pub timestamp: u64, // Unix timestamp when proof was generated
 }
 
 impl ZKProof {
@@ -110,6 +110,25 @@ impl ZKProof {
             ProofSystem::FRI => true,   // Variable size
             ProofSystem::STU => true,   // Variable size
             ProofSystem::WHIR => true,  // Variable size
+        }
+    }
+
+    /// Serialize the ZKProof to bytes (simple concat of fields)
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(&self.proof_data);
+        out.extend(&self.public_inputs);
+        out.push(self.circuit_id as u8);
+        out
+    }
+    /// Deserialize a ZKProof from bytes (assume all in proof_data for now)
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        ZKProof {
+            system: ProofSystem::Groth16, // Default for now
+            proof_data: bytes.to_vec(),
+            public_inputs: Vec::new(),
+            circuit_id: CircuitId::BlockValidity, // Default for now
+            timestamp: 0, // Default for now
         }
     }
 }

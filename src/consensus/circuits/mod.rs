@@ -1,3 +1,5 @@
+pub use crate::consensus::circuits::BlockValidityCircuit;
+pub use crate::consensus::circuits::TransactionValidityCircuit;
 // ZK-PoV Circuit implementations
 // Original circuits
 pub mod circuits;

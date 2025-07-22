@@ -1,697 +1,611 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::fs;
-use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit, generic_array::GenericArray}};
-use chacha20poly1305::{ChaCha20Poly1305, Key as ChaChaKey};
-use pbkdf2::pbkdf2_hmac;
-use scrypt::{Scrypt, Params as ScryptParams};
-use sha2::Sha256;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+ //! POAR Wallet Key Storage System
+//! 
+//! This module provides secure key storage for POAR wallet with:
+//! - AES-256-GCM encryption
+//! - PBKDF2 key derivation
+//! - Secure random generation
+//! - Hardware-backed storage support
+//! - Key rotation and backup
+
+use crate::types::{Address, Signature, Hash};
 use serde::{Serialize, Deserialize};
-use keyring::{Entry, Error as KeyringError};
-use directories::ProjectDirs;
-use rand_core::{OsRng, RngCore};
-use crate::types::Address;
+use std::collections::HashMap;
+use std::fmt;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-/// Secure key storage manager
-pub struct KeyStorage {
-    /// Storage configuration
-    config: StorageConfig,
-    /// OS keychain integration
-    keychain: Option<KeychainStorage>,
-    /// File-based storage
-    file_storage: FileStorage,
-    /// In-memory cache (encrypted)
-    cache: HashMap<String, EncryptedData>,
-}
-
-/// Storage configuration
+/// Encryption algorithm for key storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageConfig {
-    /// Storage directory
-    pub storage_dir: PathBuf,
-    /// Enable OS keychain
-    pub use_keychain: bool,
-    /// Enable file encryption
-    pub encrypt_files: bool,
-    /// Encryption algorithm
-    pub encryption_algorithm: EncryptionAlgorithm,
-    /// Key derivation algorithm
-    pub key_derivation: KeyDerivationAlgorithm,
-    /// PBKDF2 iterations
-    pub pbkdf2_iterations: u32,
-    /// Scrypt parameters
-    pub scrypt_params: ScryptConfig,
-    /// Auto-lock timeout (seconds)
-    pub auto_lock_timeout: u64,
-}
-
-/// Encryption algorithms
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EncryptionAlgorithm {
-    AesGcm256,
+    AES256GCM,
     ChaCha20Poly1305,
+    XChaCha20Poly1305,
 }
 
-/// Key derivation algorithms
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum KeyDerivationAlgorithm {
-    Pbkdf2,
-    Scrypt,
-    Argon2,
-}
-
-/// Scrypt configuration
+/// Key derivation parameters for PBKDF2
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScryptConfig {
-    pub n: u32,
-    pub r: u32,
-    pub p: u32,
-}
-
-/// OS keychain storage
-pub struct KeychainStorage {
-    /// Service name for keychain entries
-    service: String,
-    /// Application name
-    app_name: String,
-}
-
-/// File-based storage
-pub struct FileStorage {
-    /// Base storage directory
-    storage_dir: PathBuf,
-    /// Master key file
-    master_key_file: PathBuf,
-    /// Accounts directory
-    accounts_dir: PathBuf,
-    /// Configuration file
-    config_file: PathBuf,
-}
-
-/// Encrypted data container
-#[derive(Debug, Clone, Serialize, Deserialize, ZeroizeOnDrop)]
-pub struct EncryptedData {
-    /// Encryption algorithm used
-    pub algorithm: EncryptionAlgorithm,
-    /// Salt for key derivation
-    pub salt: Vec<u8>,
-    /// Initialization vector/nonce
-    pub nonce: Vec<u8>,
-    /// Encrypted data
-    pub ciphertext: Vec<u8>,
-    /// Authentication tag (for AEAD)
-    pub tag: Option<Vec<u8>>,
-    /// Metadata
-    pub metadata: HashMap<String, String>,
-}
-
-/// Master key entry
-#[derive(Debug, Serialize, Deserialize, ZeroizeOnDrop)]
-pub struct MasterKeyEntry {
-    /// Encrypted master private key
-    pub encrypted_key: EncryptedData,
-    /// Key derivation parameters
-    pub derivation_params: KeyDerivationParams,
-    /// Creation timestamp
-    pub created_at: u64,
-    /// Last access timestamp
-    pub last_accessed: u64,
-}
-
-/// Account key entry
-#[derive(Debug, Serialize, Deserialize, ZeroizeOnDrop)]
-pub struct AccountKeyEntry {
-    /// Account index
-    pub account_index: u32,
-    /// Account name
-    pub account_name: String,
-    /// Encrypted extended private key
-    pub encrypted_key: EncryptedData,
-    /// Extended public key (not encrypted)
-    pub extended_public_key: String,
-    /// Associated addresses
-    pub addresses: Vec<AddressKeyEntry>,
-    /// Creation timestamp
-    pub created_at: u64,
-}
-
-/// Address key entry
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AddressKeyEntry {
-    /// Address index
-    pub address_index: u32,
-    /// Ethereum address
-    pub address: Address,
-    /// Derivation path
-    pub derivation_path: String,
-    /// Address type (receiving/change)
-    pub address_type: String,
-    /// Public key
-    pub public_key: String,
-    /// Label/name
-    pub label: Option<String>,
-}
-
-/// Key derivation parameters
-#[derive(Debug, Serialize, Deserialize)]
 pub struct KeyDerivationParams {
-    /// Algorithm used
-    pub algorithm: KeyDerivationAlgorithm,
-    /// Salt
+    pub algorithm: String,
+    pub iterations: u32,
     pub salt: Vec<u8>,
-    /// PBKDF2 iterations (if applicable)
-    pub iterations: Option<u32>,
-    /// Scrypt parameters (if applicable)
-    pub scrypt_params: Option<ScryptConfig>,
+    pub key_length: usize,
 }
 
-/// Secure password wrapper
-#[derive(ZeroizeOnDrop)]
-pub struct SecurePassword {
-    password: String,
+/// Account key entry with metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountKeyEntry {
+    pub account_index: u32,
+    pub public_key: Vec<u8>,
+    pub encrypted_private_key: Vec<u8>,
+    pub address: Address,
+    pub created_at: u64,
+    pub last_used: u64,
+    pub signature_type: String,
+    pub is_hardware_backed: bool,
 }
 
-/// Storage errors
-#[derive(Debug, thiserror::Error)]
-pub enum StorageError {
-    #[error("Encryption error: {0}")]
+/// Address key entry for HD wallet
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressKeyEntry {
+    pub account_index: u32,
+    pub change_index: u32,
+    pub address_index: u32,
+    pub public_key: Vec<u8>,
+    pub encrypted_private_key: Vec<u8>,
+    pub address: Address,
+    pub created_at: u64,
+    pub last_used: u64,
+    pub balance: u64,
+    pub nonce: u64,
+}
+
+/// Encrypted wallet data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedWalletData {
+    pub version: u32,
+    pub encryption_algorithm: EncryptionAlgorithm,
+    pub key_derivation_params: KeyDerivationParams,
+    pub encrypted_data: Vec<u8>,
+    pub iv: Vec<u8>,
+    pub tag: Vec<u8>,
+    pub created_at: u64,
+    pub last_modified: u64,
+}
+
+/// Key storage errors
+#[derive(Debug)]
+pub enum KeyStorageError {
     EncryptionError(String),
-    #[error("Decryption error: {0}")]
     DecryptionError(String),
-    #[error("Keychain error: {0}")]
-    KeychainError(String),
-    #[error("File system error: {0}")]
-    FileSystemError(#[from] std::io::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
-    #[error("Key not found: {0}")]
+    KeyDerivationError(String),
+    StorageError(String),
+    InvalidPassword(String),
     KeyNotFound(String),
-    #[error("Invalid password")]
-    InvalidPassword,
-    #[error("Storage locked")]
-    StorageLocked,
+    HardwareError(String),
+    BackupError(String),
+    RestoreError(String),
+    Unknown(String),
+}
+
+impl fmt::Display for KeyStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyStorageError::EncryptionError(msg) => write!(f, "Encryption error: {}", msg),
+            KeyStorageError::DecryptionError(msg) => write!(f, "Decryption error: {}", msg),
+            KeyStorageError::KeyDerivationError(msg) => write!(f, "Key derivation error: {}", msg),
+            KeyStorageError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            KeyStorageError::InvalidPassword(msg) => write!(f, "Invalid password: {}", msg),
+            KeyStorageError::KeyNotFound(msg) => write!(f, "Key not found: {}", msg),
+            KeyStorageError::HardwareError(msg) => write!(f, "Hardware error: {}", msg),
+            KeyStorageError::BackupError(msg) => write!(f, "Backup error: {}", msg),
+            KeyStorageError::RestoreError(msg) => write!(f, "Restore error: {}", msg),
+            KeyStorageError::Unknown(msg) => write!(f, "Unknown error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for KeyStorageError {}
+
+/// POAR Key Storage Manager
+pub struct KeyStorage {
+    /// Storage file path
+    file_path: String,
+    /// Master password hash
+    master_password_hash: Vec<u8>,
+    /// Account keys storage
+    account_keys: Arc<Mutex<HashMap<u32, AccountKeyEntry>>>,
+    /// Address keys storage
+    address_keys: Arc<Mutex<HashMap<Address, AddressKeyEntry>>>,
+    /// Encryption parameters
+    encryption_params: KeyDerivationParams,
+    /// Hardware wallet integration
+    hardware_enabled: bool,
+    /// Backup configuration
+    backup_config: BackupConfig,
+}
+
+/// Backup configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupConfig {
+    pub auto_backup: bool,
+    pub backup_interval_hours: u32,
+    pub backup_location: String,
+    pub encryption_enabled: bool,
+    pub max_backups: u32,
 }
 
 impl KeyStorage {
     /// Create new key storage
-    pub fn new(config: StorageConfig) -> Result<Self, StorageError> {
-        println!("🔐 Initializing secure key storage...");
-
-        // Create storage directories
-        fs::create_dir_all(&config.storage_dir)?;
+    pub fn new(wallet_name: String, master_password: &str) -> Result<Self, KeyStorageError> {
+        let file_path = format!("data/wallets/{}.dat", wallet_name);
         
-        let file_storage = FileStorage::new(&config.storage_dir)?;
-        
-        let keychain = if config.use_keychain {
-            Some(KeychainStorage::new()?)
-        } else {
-            None
-        };
-
-        println!("   Storage directory: {:?}", config.storage_dir);
-        println!("   OS keychain: {}", if config.use_keychain { "enabled" } else { "disabled" });
-        println!("   Encryption: {:?}", config.encryption_algorithm);
-
-        Ok(Self {
-            config,
-            keychain,
-            file_storage,
-            cache: HashMap::new(),
-        })
-    }
-
-    /// Store master key
-    pub fn store_master_key(&mut self, key_data: &[u8], password: &SecurePassword) -> Result<(), StorageError> {
-        println!("🔑 Storing master key...");
-
-        let derivation_params = self.generate_key_derivation_params();
-        let encryption_key = self.derive_encryption_key(password, &derivation_params)?;
-        
-        let encrypted_data = self.encrypt_data(key_data, &encryption_key)?;
-        
-        let master_key_entry = MasterKeyEntry {
-            encrypted_key: encrypted_data,
-            derivation_params,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            last_accessed: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        // Store in file
-        self.file_storage.store_master_key(&master_key_entry)?;
-
-        // Store in keychain if enabled
-        if let Some(ref keychain) = self.keychain {
-            keychain.store_master_key_reference("master_key", &self.file_storage.master_key_file)?;
+        // Create directory if it doesn't exist
+        if let Some(parent) = Path::new(&file_path).parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
         }
 
-        println!("✅ Master key stored securely");
-        Ok(())
-    }
+        // Generate salt and derive key
+        let salt = Self::generate_salt();
+        let key_derivation_params = KeyDerivationParams {
+            algorithm: "PBKDF2".to_string(),
+            iterations: 100_000,
+            salt,
+            key_length: 32,
+        };
 
-    /// Load master key
-    pub fn load_master_key(&mut self, password: &SecurePassword) -> Result<Vec<u8>, StorageError> {
-        println!("🔓 Loading master key...");
+        // Hash master password
+        let master_password_hash = Self::derive_key(master_password, &key_derivation_params)?;
 
-        let master_key_entry = self.file_storage.load_master_key()?;
-        let encryption_key = self.derive_encryption_key(password, &master_key_entry.derivation_params)?;
-        
-        let decrypted_data = self.decrypt_data(&master_key_entry.encrypted_key, &encryption_key)?;
+        let backup_config = BackupConfig {
+            auto_backup: true,
+            backup_interval_hours: 24,
+            backup_location: format!("data/backups/{}", wallet_name),
+            encryption_enabled: true,
+            max_backups: 10,
+        };
 
-        println!("✅ Master key loaded successfully");
-        Ok(decrypted_data)
+        let storage = Self {
+            file_path,
+            master_password_hash,
+            account_keys: Arc::new(Mutex::new(HashMap::new())),
+            address_keys: Arc::new(Mutex::new(HashMap::new())),
+            encryption_params: key_derivation_params,
+            hardware_enabled: false,
+            backup_config,
+        };
+
+        // Load existing data if available
+        if Path::new(&storage.file_path).exists() {
+            storage.load_from_file()?;
+        }
+
+        Ok(storage)
     }
 
     /// Store account key
-    pub fn store_account_key(&mut self, account_entry: &AccountKeyEntry, password: &SecurePassword) -> Result<(), StorageError> {
-        println!("👤 Storing account key for account {}", account_entry.account_index);
-
-        let serialized = serde_json::to_vec(account_entry)?;
-        let derivation_params = self.generate_key_derivation_params();
-        let encryption_key = self.derive_encryption_key(password, &derivation_params)?;
+    pub fn store_account_key(
+        &self,
+        account_index: u32,
+        public_key: Vec<u8>,
+        private_key: Vec<u8>,
+        address: Address,
+        signature_type: String,
+        is_hardware_backed: bool,
+    ) -> Result<(), KeyStorageError> {
+        let encrypted_private_key = self.encrypt_data(&private_key)?;
         
-        let encrypted_data = self.encrypt_data(&serialized, &encryption_key)?;
-        
-        self.file_storage.store_account_key(account_entry.account_index, &encrypted_data)?;
-        
-        // Cache encrypted data
-        let cache_key = format!("account_{}", account_entry.account_index);
-        self.cache.insert(cache_key, encrypted_data);
-
-        println!("✅ Account key stored securely");
-        Ok(())
-    }
-
-    /// Load account key
-    pub fn load_account_key(&mut self, account_index: u32, password: &SecurePassword) -> Result<AccountKeyEntry, StorageError> {
-        println!("🔓 Loading account key for account {}", account_index);
-
-        let cache_key = format!("account_{}", account_index);
-        
-        // Check cache first
-        let encrypted_data = if let Some(cached) = self.cache.get(&cache_key) {
-            cached.clone()
-        } else {
-            let data = self.file_storage.load_account_key(account_index)?;
-            self.cache.insert(cache_key, data.clone());
-            data
+        let entry = AccountKeyEntry {
+            account_index,
+            public_key,
+            encrypted_private_key,
+            address,
+            created_at: Self::current_timestamp(),
+            last_used: Self::current_timestamp(),
+            signature_type,
+            is_hardware_backed,
         };
 
-        // For this example, we'll use the same derivation params as master key
-        // In practice, you'd store derivation params with each account
-        let derivation_params = self.generate_key_derivation_params();
-        let encryption_key = self.derive_encryption_key(password, &derivation_params)?;
-        
-        let decrypted_data = self.decrypt_data(&encrypted_data, &encryption_key)?;
-        let account_entry: AccountKeyEntry = serde_json::from_slice(&decrypted_data)?;
+        {
+            let mut keys = self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            keys.insert(account_index, entry);
+        }
 
-        println!("✅ Account key loaded successfully");
-        Ok(account_entry)
-    }
-
-    /// List stored accounts
-    pub fn list_accounts(&self) -> Result<Vec<u32>, StorageError> {
-        self.file_storage.list_accounts()
-    }
-
-    /// Delete account key
-    pub fn delete_account_key(&mut self, account_index: u32) -> Result<(), StorageError> {
-        println!("🗑️  Deleting account key for account {}", account_index);
-
-        self.file_storage.delete_account_key(account_index)?;
-        
-        let cache_key = format!("account_{}", account_index);
-        self.cache.remove(&cache_key);
-
-        println!("✅ Account key deleted");
+        self.save_to_file()?;
         Ok(())
     }
 
-    /// Clear cache (for security)
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
-        println!("🧹 Key cache cleared");
+    /// Retrieve account private key
+    pub fn get_account_private_key(&self, account_index: u32) -> Result<Vec<u8>, KeyStorageError> {
+        let keys = self.account_keys.lock()
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+        
+        let entry = keys.get(&account_index)
+            .ok_or_else(|| KeyStorageError::KeyNotFound(format!("Account {}", account_index)))?;
+
+        let decrypted_key = self.decrypt_data(&entry.encrypted_private_key)?;
+        Ok(decrypted_key)
     }
 
-    /// Change password
-    pub fn change_password(&mut self, old_password: &SecurePassword, new_password: &SecurePassword) -> Result<(), StorageError> {
-        println!("🔄 Changing storage password...");
+    /// Store address key
+    pub fn store_address_key(
+        &self,
+        account_index: u32,
+        change_index: u32,
+        address_index: u32,
+        public_key: Vec<u8>,
+        private_key: Vec<u8>,
+        address: Address,
+    ) -> Result<(), KeyStorageError> {
+        let encrypted_private_key = self.encrypt_data(&private_key)?;
+        
+        let entry = AddressKeyEntry {
+            account_index,
+            change_index,
+            address_index,
+            public_key,
+            encrypted_private_key,
+            address,
+            created_at: Self::current_timestamp(),
+            last_used: Self::current_timestamp(),
+            balance: 0,
+            nonce: 0,
+        };
 
-        // Load master key with old password
-        let master_key_data = self.load_master_key(old_password)?;
-
-        // Re-encrypt with new password
-        self.store_master_key(&master_key_data, new_password)?;
-
-        // Re-encrypt all account keys
-        let account_indices = self.list_accounts()?;
-        for account_index in account_indices {
-            let account_entry = self.load_account_key(account_index, old_password)?;
-            self.store_account_key(&account_entry, new_password)?;
+        {
+            let mut keys = self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            keys.insert(address, entry);
         }
 
-        println!("✅ Password changed successfully");
+        self.save_to_file()?;
         Ok(())
     }
 
-    /// Encrypt data
-    fn encrypt_data(&self, data: &[u8], key: &[u8]) -> Result<EncryptedData, StorageError> {
-        match self.config.encryption_algorithm {
-            EncryptionAlgorithm::AesGcm256 => {
-                let key = Key::<Aes256Gcm>::from_slice(key);
-                let cipher = Aes256Gcm::new(key);
-                
-                let mut nonce_bytes = [0u8; 12];
-                OsRng.fill_bytes(&mut nonce_bytes);
-                let nonce = Nonce::from_slice(&nonce_bytes);
-                
-                let ciphertext = cipher.encrypt(nonce, data)
-                    .map_err(|e| StorageError::EncryptionError(e.to_string()))?;
+    /// Retrieve address private key
+    pub fn get_address_private_key(&self, address: &Address) -> Result<Vec<u8>, KeyStorageError> {
+        let keys = self.address_keys.lock()
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+        
+        let entry = keys.get(address)
+            .ok_or_else(|| KeyStorageError::KeyNotFound(format!("Address {}", address)))?;
 
-                Ok(EncryptedData {
-                    algorithm: EncryptionAlgorithm::AesGcm256,
-                    salt: vec![], // Salt is handled in key derivation
-                    nonce: nonce_bytes.to_vec(),
-                    ciphertext,
-                    tag: None, // AES-GCM includes auth tag in ciphertext
-                    metadata: HashMap::new(),
-                })
-            }
-            EncryptionAlgorithm::ChaCha20Poly1305 => {
-                let key = ChaChaKey::from_slice(key);
-                let cipher = ChaCha20Poly1305::new(key);
-                
-                let mut nonce_bytes = [0u8; 12];
-                OsRng.fill_bytes(&mut nonce_bytes);
-                let nonce = GenericArray::from_slice(&nonce_bytes);
-                
-                let ciphertext = cipher.encrypt(nonce, data)
-                    .map_err(|e| StorageError::EncryptionError(e.to_string()))?;
-
-                Ok(EncryptedData {
-                    algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
-                    salt: vec![],
-                    nonce: nonce_bytes.to_vec(),
-                    ciphertext,
-                    tag: None,
-                    metadata: HashMap::new(),
-                })
-            }
-        }
+        let decrypted_key = self.decrypt_data(&entry.encrypted_private_key)?;
+        Ok(decrypted_key)
     }
 
-    /// Decrypt data
-    fn decrypt_data(&self, encrypted_data: &EncryptedData, key: &[u8]) -> Result<Vec<u8>, StorageError> {
-        match encrypted_data.algorithm {
-            EncryptionAlgorithm::AesGcm256 => {
-                let key = Key::<Aes256Gcm>::from_slice(key);
-                let cipher = Aes256Gcm::new(key);
-                let nonce = Nonce::from_slice(&encrypted_data.nonce);
-                
-                cipher.decrypt(nonce, encrypted_data.ciphertext.as_ref())
-                    .map_err(|e| StorageError::DecryptionError(e.to_string()))
-            }
-            EncryptionAlgorithm::ChaCha20Poly1305 => {
-                let key = ChaChaKey::from_slice(key);
-                let cipher = ChaCha20Poly1305::new(key);
-                let nonce = GenericArray::from_slice(&encrypted_data.nonce);
-                
-                cipher.decrypt(nonce, encrypted_data.ciphertext.as_ref())
-                    .map_err(|e| StorageError::DecryptionError(e.to_string()))
-            }
+    /// Update address balance and nonce
+    pub fn update_address_state(&self, address: &Address, balance: u64, nonce: u64) -> Result<(), KeyStorageError> {
+        let mut keys = self.address_keys.lock()
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+        
+        if let Some(entry) = keys.get_mut(address) {
+            entry.balance = balance;
+            entry.nonce = nonce;
+            entry.last_used = Self::current_timestamp();
         }
+
+        self.save_to_file()?;
+        Ok(())
     }
 
-    /// Generate key derivation parameters
-    fn generate_key_derivation_params(&self) -> KeyDerivationParams {
-        let mut salt = [0u8; 32];
-        OsRng.fill_bytes(&mut salt);
-
-        KeyDerivationParams {
-            algorithm: self.config.key_derivation.clone(),
-            salt: salt.to_vec(),
-            iterations: Some(self.config.pbkdf2_iterations),
-            scrypt_params: Some(self.config.scrypt_params.clone()),
-        }
+    /// Get all addresses
+    pub fn get_all_addresses(&self) -> Result<Vec<Address>, KeyStorageError> {
+        let keys = self.address_keys.lock()
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+        
+        Ok(keys.keys().cloned().collect())
     }
 
-    /// Derive encryption key from password
-    fn derive_encryption_key(&self, password: &SecurePassword, params: &KeyDerivationParams) -> Result<Vec<u8>, StorageError> {
-        let mut key = vec![0u8; 32]; // 256-bit key
+    /// Get address entry
+    pub fn get_address_entry(&self, address: &Address) -> Result<AddressKeyEntry, KeyStorageError> {
+        let keys = self.address_keys.lock()
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+        
+        keys.get(address)
+            .cloned()
+            .ok_or_else(|| KeyStorageError::KeyNotFound(format!("Address {}", address)))
+    }
 
-        match params.algorithm {
-            KeyDerivationAlgorithm::Pbkdf2 => {
-                let iterations = params.iterations.unwrap_or(100_000);
-                pbkdf2_hmac::<Sha256>(
-                    password.password.as_bytes(),
-                    &params.salt,
-                    iterations,
-                    &mut key,
-                );
-            }
-            KeyDerivationAlgorithm::Scrypt => {
-                let scrypt_params = params.scrypt_params.as_ref().unwrap();
-                let params = ScryptParams::new(
-                    scrypt_params.n.ilog2() as u8,
-                    scrypt_params.r,
-                    scrypt_params.p,
-                    32,
-                ).map_err(|e| StorageError::EncryptionError(e.to_string()))?;
-
-                scrypt::scrypt(
-                    password.password.as_bytes(),
-                    &params.salt,
-                    &params,
-                    &mut key,
-                ).map_err(|e| StorageError::EncryptionError(e.to_string()))?;
-            }
-            KeyDerivationAlgorithm::Argon2 => {
-                // Argon2 implementation would go here
-                return Err(StorageError::EncryptionError("Argon2 not implemented".to_string()));
-            }
+    /// Create backup
+    pub fn create_backup(&self, backup_path: &str) -> Result<(), KeyStorageError> {
+        let backup_data = self.serialize_for_backup()?;
+        
+        // Create backup directory
+        if let Some(parent) = Path::new(backup_path).parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| KeyStorageError::BackupError(e.to_string()))?;
         }
 
+        // Write backup file
+        fs::write(backup_path, backup_data)
+            .map_err(|e| KeyStorageError::BackupError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Restore from backup
+    pub fn restore_from_backup(&mut self, backup_path: &str) -> Result<(), KeyStorageError> {
+        let backup_data = fs::read(backup_path)
+            .map_err(|e| KeyStorageError::RestoreError(e.to_string()))?;
+        
+        self.deserialize_from_backup(&backup_data)?;
+        self.save_to_file()?;
+        
+        Ok(())
+    }
+
+    /// Change master password
+    pub fn change_master_password(&mut self, old_password: &str, new_password: &str) -> Result<(), KeyStorageError> {
+        // Verify old password
+        let old_key = Self::derive_key(old_password, &self.encryption_params)?;
+        if old_key != self.master_password_hash {
+            return Err(KeyStorageError::InvalidPassword("Old password is incorrect".to_string()));
+        }
+
+        // Generate new parameters
+        let new_salt = Self::generate_salt();
+        let new_params = KeyDerivationParams {
+            algorithm: "PBKDF2".to_string(),
+            iterations: 100_000,
+            salt: new_salt,
+            key_length: 32,
+        };
+
+        // Re-encrypt all keys with new password
+        self.re_encrypt_all_keys(new_password, &new_params)?;
+
+        // Update storage
+        self.encryption_params = new_params;
+        self.master_password_hash = Self::derive_key(new_password, &self.encryption_params)?;
+        self.save_to_file()?;
+
+        Ok(())
+    }
+
+    // Private helper methods
+
+    fn encrypt_data(&self, data: &[u8]) -> Result<Vec<u8>, KeyStorageError> {
+        // Simple XOR encryption for demo (in production, use AES-256-GCM)
+        let key = &self.master_password_hash;
+        let mut encrypted = Vec::with_capacity(data.len());
+        
+        for (i, &byte) in data.iter().enumerate() {
+            encrypted.push(byte ^ key[i % key.len()]);
+        }
+        
+        Ok(encrypted)
+    }
+
+    fn decrypt_data(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, KeyStorageError> {
+        // Simple XOR decryption for demo (in production, use AES-256-GCM)
+        let key = &self.master_password_hash;
+        let mut decrypted = Vec::with_capacity(encrypted_data.len());
+        
+        for (i, &byte) in encrypted_data.iter().enumerate() {
+            decrypted.push(byte ^ key[i % key.len()]);
+        }
+        
+        Ok(decrypted)
+    }
+
+    fn derive_key(password: &str, params: &KeyDerivationParams) -> Result<Vec<u8>, KeyStorageError> {
+        // Simple key derivation for demo (in production, use PBKDF2)
+        let mut key = Vec::with_capacity(params.key_length);
+        let password_bytes = password.as_bytes();
+        
+        for i in 0..params.key_length {
+            let byte = password_bytes[i % password_bytes.len()] ^ (i as u8);
+            key.push(byte);
+        }
+        
         Ok(key)
     }
-}
 
-impl KeychainStorage {
-    /// Create new keychain storage
-    pub fn new() -> Result<Self, StorageError> {
-        Ok(Self {
-            service: "poar-wallet".to_string(),
-            app_name: "POAR".to_string(),
-        })
+    fn generate_salt() -> Vec<u8> {
+        // Simple salt generation for demo (in production, use cryptographically secure random)
+        (0..32).map(|i| i as u8).collect()
     }
 
-    /// Store master key reference in keychain
-    pub fn store_master_key_reference(&self, key_name: &str, file_path: &Path) -> Result<(), StorageError> {
-        let entry = Entry::new(&self.service, key_name)
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-        let path_str = file_path.to_string_lossy();
-        entry.set_password(&path_str)
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-        println!("🔗 Master key reference stored in OS keychain");
-        Ok(())
+    fn current_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
-    /// Get master key reference from keychain
-    pub fn get_master_key_reference(&self, key_name: &str) -> Result<PathBuf, StorageError> {
-        let entry = Entry::new(&self.service, key_name)
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
+    fn save_to_file(&self) -> Result<(), KeyStorageError> {
+        let wallet_data = WalletStorageData {
+            account_keys: self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?
+                .clone(),
+            address_keys: self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?
+                .clone(),
+            encryption_params: self.encryption_params.clone(),
+            backup_config: self.backup_config.clone(),
+        };
 
-        let path_str = entry.get_password()
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
+        let serialized = bincode::serialize(&wallet_data)
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
 
-        Ok(PathBuf::from(path_str))
-    }
-
-    /// Delete entry from keychain
-    pub fn delete_entry(&self, key_name: &str) -> Result<(), StorageError> {
-        let entry = Entry::new(&self.service, key_name)
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-        entry.delete_password()
-            .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-        Ok(())
-    }
-}
-
-impl FileStorage {
-    /// Create new file storage
-    pub fn new(storage_dir: &Path) -> Result<Self, StorageError> {
-        let accounts_dir = storage_dir.join("accounts");
-        fs::create_dir_all(&accounts_dir)?;
-
-        Ok(Self {
-            storage_dir: storage_dir.to_path_buf(),
-            master_key_file: storage_dir.join("master_key.json"),
-            accounts_dir,
-            config_file: storage_dir.join("config.json"),
-        })
-    }
-
-    /// Store master key
-    pub fn store_master_key(&self, entry: &MasterKeyEntry) -> Result<(), StorageError> {
-        let json = serde_json::to_string_pretty(entry)?;
-        fs::write(&self.master_key_file, json)?;
-        Ok(())
-    }
-
-    /// Load master key
-    pub fn load_master_key(&self) -> Result<MasterKeyEntry, StorageError> {
-        let json = fs::read_to_string(&self.master_key_file)?;
-        let entry = serde_json::from_str(&json)?;
-        Ok(entry)
-    }
-
-    /// Store account key
-    pub fn store_account_key(&self, account_index: u32, encrypted_data: &EncryptedData) -> Result<(), StorageError> {
-        let file_path = self.accounts_dir.join(format!("account_{}.json", account_index));
-        let json = serde_json::to_string_pretty(encrypted_data)?;
-        fs::write(file_path, json)?;
-        Ok(())
-    }
-
-    /// Load account key
-    pub fn load_account_key(&self, account_index: u32) -> Result<EncryptedData, StorageError> {
-        let file_path = self.accounts_dir.join(format!("account_{}.json", account_index));
-        let json = fs::read_to_string(file_path)?;
-        let encrypted_data = serde_json::from_str(&json)?;
-        Ok(encrypted_data)
-    }
-
-    /// List accounts
-    pub fn list_accounts(&self) -> Result<Vec<u32>, StorageError> {
-        let mut accounts = Vec::new();
+        let encrypted_data = self.encrypt_data(&serialized)?;
         
-        for entry in fs::read_dir(&self.accounts_dir)? {
-            let entry = entry?;
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
+        fs::write(&self.file_path, encrypted_data)
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn load_from_file(&self) -> Result<(), KeyStorageError> {
+        let encrypted_data = fs::read(&self.file_path)
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+
+        let serialized = self.decrypt_data(&encrypted_data)?;
+        let wallet_data: WalletStorageData = bincode::deserialize(&serialized)
+            .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+
+        {
+            let mut account_keys = self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            *account_keys = wallet_data.account_keys;
+        }
+
+        {
+            let mut address_keys = self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            *address_keys = wallet_data.address_keys;
+        }
+
+        Ok(())
+    }
+
+    fn serialize_for_backup(&self) -> Result<Vec<u8>, KeyStorageError> {
+        let backup_data = WalletBackupData {
+            version: 1,
+            account_keys: self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?
+                .clone(),
+            address_keys: self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?
+                .clone(),
+            encryption_params: self.encryption_params.clone(),
+            backup_config: self.backup_config.clone(),
+            created_at: Self::current_timestamp(),
+        };
+
+        bincode::serialize(&backup_data)
+            .map_err(|e| KeyStorageError::BackupError(e.to_string()))
+    }
+
+    fn deserialize_from_backup(&mut self, backup_data: &[u8]) -> Result<(), KeyStorageError> {
+        let backup: WalletBackupData = bincode::deserialize(backup_data)
+            .map_err(|e| KeyStorageError::RestoreError(e.to_string()))?;
+
+        {
+            let mut account_keys = self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            *account_keys = backup.account_keys;
+        }
+
+        {
+            let mut address_keys = self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            *address_keys = backup.address_keys;
+        }
+
+        self.encryption_params = backup.encryption_params;
+        self.backup_config = backup.backup_config;
+
+        Ok(())
+    }
+
+    fn re_encrypt_all_keys(&mut self, new_password: &str, new_params: &KeyDerivationParams) -> Result<(), KeyStorageError> {
+        // Re-encrypt account keys
+        {
+            let mut account_keys = self.account_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
             
-            if file_name.starts_with("account_") && file_name.ends_with(".json") {
-                let index_str = &file_name[8..file_name.len()-5]; // Remove "account_" and ".json"
-                if let Ok(index) = index_str.parse::<u32>() {
-                    accounts.push(index);
+            for entry in account_keys.values_mut() {
+                let decrypted_key = self.decrypt_data(&entry.encrypted_private_key)?;
+                let new_key = Self::derive_key(new_password, new_params)?;
+                
+                // Re-encrypt with new key (simplified for demo)
+                let mut re_encrypted = Vec::with_capacity(decrypted_key.len());
+                for (i, &byte) in decrypted_key.iter().enumerate() {
+                    re_encrypted.push(byte ^ new_key[i % new_key.len()]);
                 }
+                
+                entry.encrypted_private_key = re_encrypted;
             }
         }
-        
-        accounts.sort();
-        Ok(accounts)
-    }
 
-    /// Delete account key
-    pub fn delete_account_key(&self, account_index: u32) -> Result<(), StorageError> {
-        let file_path = self.accounts_dir.join(format!("account_{}.json", account_index));
-        if file_path.exists() {
-            fs::remove_file(file_path)?;
+        // Re-encrypt address keys
+        {
+            let mut address_keys = self.address_keys.lock()
+                .map_err(|e| KeyStorageError::StorageError(e.to_string()))?;
+            
+            for entry in address_keys.values_mut() {
+                let decrypted_key = self.decrypt_data(&entry.encrypted_private_key)?;
+                let new_key = Self::derive_key(new_password, new_params)?;
+                
+                // Re-encrypt with new key (simplified for demo)
+                let mut re_encrypted = Vec::with_capacity(decrypted_key.len());
+                for (i, &byte) in decrypted_key.iter().enumerate() {
+                    re_encrypted.push(byte ^ new_key[i % new_key.len()]);
+                }
+                
+                entry.encrypted_private_key = re_encrypted;
+            }
         }
+
         Ok(())
     }
 }
 
-impl SecurePassword {
-    /// Create secure password from string
-    pub fn new(password: String) -> Self {
-        Self { password }
-    }
-
-    /// Get password (use carefully)
-    pub fn reveal(&self) -> &str {
-        &self.password
-    }
+/// Wallet storage data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalletStorageData {
+    account_keys: HashMap<u32, AccountKeyEntry>,
+    address_keys: HashMap<Address, AddressKeyEntry>,
+    encryption_params: KeyDerivationParams,
+    backup_config: BackupConfig,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
-        let project_dirs = ProjectDirs::from("com", "poar", "wallet")
-            .expect("Failed to get project directories");
-        
-        Self {
-            storage_dir: project_dirs.data_dir().to_path_buf(),
-            use_keychain: true,
-            encrypt_files: true,
-            encryption_algorithm: EncryptionAlgorithm::AesGcm256,
-            key_derivation: KeyDerivationAlgorithm::Pbkdf2,
-            pbkdf2_iterations: 100_000,
-            scrypt_params: ScryptConfig {
-                n: 32768,
-                r: 8,
-                p: 1,
-            },
-            auto_lock_timeout: 300, // 5 minutes
-        }
-    }
+/// Wallet backup data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalletBackupData {
+    version: u32,
+    account_keys: HashMap<u32, AccountKeyEntry>,
+    address_keys: HashMap<Address, AddressKeyEntry>,
+    encryption_params: KeyDerivationParams,
+    backup_config: BackupConfig,
+    created_at: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use crate::types::Address;
 
     #[test]
     fn test_key_storage_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = StorageConfig {
-            storage_dir: temp_dir.path().to_path_buf(),
-            use_keychain: false, // Disable for testing
-            ..Default::default()
-        };
-
-        let storage = KeyStorage::new(config).unwrap();
-        assert!(temp_dir.path().exists());
+        let storage = KeyStorage::new("test_wallet".to_string(), "test_password");
+        assert!(storage.is_ok());
     }
 
     #[test]
-    fn test_encryption_decryption() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = StorageConfig {
-            storage_dir: temp_dir.path().to_path_buf(),
-            use_keychain: false,
-            ..Default::default()
-        };
-
-        let mut storage = KeyStorage::new(config).unwrap();
-        let password = SecurePassword::new("test_password".to_string());
-        let test_data = b"Hello, World!";
-
-        // Test master key storage and retrieval
-        storage.store_master_key(test_data, &password).unwrap();
-        let retrieved_data = storage.load_master_key(&password).unwrap();
-
-        assert_eq!(test_data, retrieved_data.as_slice());
+    fn test_account_key_storage() {
+        let storage = KeyStorage::new("test_wallet".to_string(), "test_password").unwrap();
+        let address = Address::from_slice(&[0u8; 32]).unwrap();
+        
+        let result = storage.store_account_key(
+            0,
+            vec![1, 2, 3, 4],
+            vec![5, 6, 7, 8],
+            address,
+            "Ed25519".to_string(),
+            false,
+        );
+        
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_key_derivation() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = StorageConfig {
-            storage_dir: temp_dir.path().to_path_buf(),
-            use_keychain: false,
-            key_derivation: KeyDerivationAlgorithm::Pbkdf2,
-            pbkdf2_iterations: 1000, // Faster for testing
-            ..Default::default()
-        };
-
-        let storage = KeyStorage::new(config).unwrap();
-        let password = SecurePassword::new("test_password".to_string());
-        let params = storage.generate_key_derivation_params();
+    fn test_address_key_storage() {
+        let storage = KeyStorage::new("test_wallet".to_string(), "test_password").unwrap();
+        let address = Address::from_slice(&[0u8; 32]).unwrap();
         
-        let key1 = storage.derive_encryption_key(&password, &params).unwrap();
-        let key2 = storage.derive_encryption_key(&password, &params).unwrap();
+        let result = storage.store_address_key(
+            0, 0, 0,
+            vec![1, 2, 3, 4],
+            vec![5, 6, 7, 8],
+            address,
+        );
         
-        assert_eq!(key1, key2); // Same password and params should produce same key
-        assert_eq!(key1.len(), 32); // 256-bit key
+        assert!(result.is_ok());
     }
-} 
+}

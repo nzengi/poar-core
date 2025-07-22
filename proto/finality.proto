@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package poar;
+
+message FinalityGossip {
+  bytes block_header = 1; // Serialized BlockHeader
+  bytes zk_proof = 2;    // Serialized ZK proof
+} 

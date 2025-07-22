@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, BTreeMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::types::{Hash, Address, Signature, Poar, Proof, Valid, Zero, TokenUnit};
+use crate::types::signature::SignatureKind;
+// use crate::proto::poar as proto;
 
 /// POAR transaction with ZK-proof support
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +36,59 @@ pub struct Transaction {
     /// Transaction type
     pub tx_type: TransactionType,
 }
+
+// impl From<proto::Transaction> for Transaction {
+//     fn from(pb: proto::Transaction) -> Self {
+//         Transaction {
+//             hash: Hash::from_slice(&pb.hash).expect("Hash must be 32 bytes"),
+//             from: Address::from_slice(&pb.from).expect("Address must be 20 bytes"),
+//             to: Address::from_slice(&pb.to).expect("Address must be 20 bytes"),
+//             amount: pb.amount,
+//             fee: pb.fee,
+//             gas_limit: pb.gas_limit,
+//             gas_price: pb.gas_price,
+//             nonce: pb.nonce,
+//             data: pb.data,
+//             signature: Signature::from_bytes(SignatureKind::Ed25519, &pb.signature).expect("Signature decode"),
+//             timestamp: pb.timestamp,
+//             tx_type: match pb.tx_type {
+//                 0 => TransactionType::Transfer,
+//                 1 => TransactionType::ContractDeployment,
+//                 2 => TransactionType::ContractCall,
+//                 3 => TransactionType::ValidatorStaking,
+//                 4 => TransactionType::ValidatorUnstaking,
+//                 5 => TransactionType::System,
+//                 _ => TransactionType::Transfer,
+//             },
+//         }
+//     }
+// }
+
+// impl From<Transaction> for proto::Transaction {
+//     fn from(tx: Transaction) -> Self {
+//         proto::Transaction {
+//             hash: tx.hash.as_bytes().to_vec(),
+//             from: tx.from.as_bytes().to_vec(),
+//             to: tx.to.as_bytes().to_vec(),
+//             amount: tx.amount,
+//             fee: tx.fee,
+//             gas_limit: tx.gas_limit,
+//             gas_price: tx.gas_price,
+//             nonce: tx.nonce,
+//             data: tx.data,
+//             signature: tx.signature.to_bytes(),
+//             timestamp: tx.timestamp,
+//             tx_type: match tx.tx_type {
+//                 TransactionType::Transfer => 0,
+//                 TransactionType::ContractDeployment => 1,
+//                 TransactionType::ContractCall => 2,
+//                 TransactionType::ValidatorStaking => 3,
+//                 TransactionType::ValidatorUnstaking => 4,
+//                 TransactionType::System => 5,
+//             },
+//         }
+//     }
+// }
 
 /// Transaction input for UTXO model (if we choose UTXO)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

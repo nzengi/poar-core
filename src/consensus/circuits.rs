@@ -346,7 +346,7 @@ impl ConstraintSynthesizer<Fr> for ValidatorEligibilityCircuit {
             Ok(Fr::from(self.stake_amount.unwrap_or(0)))
         })?;
         
-        let min_stake = FpVar::constant(Fr::from(10000u64));
+        let min_stake = FpVar::constant(Fr::from(50000u64)); // Minimum validator stake: 50,000 POAR
         stake.is_ge(&min_stake)?.enforce_equal(&Boolean::TRUE)?;
         
         // Constraint 2: Validator selection randomness
