@@ -108,11 +108,10 @@ impl XMSSKeyPair {
     }
 }
 
-fn verify_wots_signature(message: &[u8], signature: &[u8], public_key: &[u8], params: &WotsParams) -> bool {
-    use crate::crypto::wots::keygen::derive_public_key;
-    // WOTS+ doğrulama: imzadan public key türet ve verilen public key ile karşılaştır
-    let derived_pk = derive_public_key(signature, params);
-    &derived_pk == public_key
+fn verify_wots_signature(message: &[u8], signature: &Vec<u8>, public_key: &Vec<u8>, params: &WotsParams) -> bool {
+    use crate::crypto::wots::verify::verify_signature;
+    // WOTS+ doğrulama: imzayı public key ile doğrula
+    verify_signature(message, signature, public_key, params)
 }
 
 impl XMSSSignature {
