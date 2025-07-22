@@ -249,5 +249,4 @@ test crypto::xmss::tests::test_xmss_exhaustion ... ok
 
 test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.67s
 
-*Generated on: December 2024*  
 *POAR Blockchain Core v1.0*
