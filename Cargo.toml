@@ -23,6 +23,7 @@ ark-serialize = "0.5"
 ark-ff = "0.5"
 ark-ec = "0.5"
 ark-bls12-381 = "0.5"
+ark-relations = "0.5"
 thiserror = "1.0"
 
 # Serialization
@@ -163,6 +164,8 @@ directories = "5.0"               # Standard directory locations
 
 pqcrypto-falcon = "0.4.0"
 pqcrypto-traits = "0.3"
+
+ark-r1cs-std = "0.5"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
